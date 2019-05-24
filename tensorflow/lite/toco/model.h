@@ -24,11 +24,11 @@ limitations under the License.
 #include <vector>
 
 #include "absl/types/optional.h"
+#include "tensorflow/core/platform/logging.h"
 #include "tensorflow/lite/toco/model_flags.pb.h"
 #include "tensorflow/lite/toco/runtime/types.h"
 #include "tensorflow/lite/toco/toco_port.h"
 #include "tensorflow/lite/toco/toco_types.h"
-#include "tensorflow/core/platform/logging.h"
 
 namespace toco {
 
@@ -45,6 +45,7 @@ enum class OperatorType : uint8 {
   kCeil,
   kConv,
   kConcatenation,
+  kCos,
   kDepthwiseConv,
   kDepthToSpace,
   kSpaceToDepth,
@@ -81,6 +82,7 @@ enum class OperatorType : uint8 {
   kTransposeConv,
   kCast,
   kFloor,
+  kRound,
   kGather,
   kResizeBilinear,
   kSin,
@@ -160,7 +162,16 @@ enum class OperatorType : uint8 {
   kAbs,
   kMirrorPad,
   kUnique,
-  kUnidirectionalSequenceRnn
+  kUnidirectionalSequenceRnn,
+  kBidirectionalSequenceLstm,
+  kReverseV2,
+  kBidirectionalSequenceRnn,
+  kGatherNd,
+  kWhere,
+  kElu,
+  kReverseSequence,
+  kMatrixDiag,
+  kMatrixSetDiag
 };
 
 // Helper to deal with TensorFlow arrays using a different ordering of
@@ -212,6 +223,7 @@ enum class ArrayDataType : uint8 {
   kUint64,  // 10
   kString,
   kComplex64,
+  kFloat16,
 };
 
 // Compile-time logic to map ArrayDataType to the corresponding C++ scalar type
@@ -650,6 +662,18 @@ struct UnidirectionalSequenceLstmOperator : Operator {
       : Operator(OperatorType::kUnidirectionalSequenceLstm) {}
 };
 
+struct BidirectionalSequenceLstmOperator : Operator {
+  BidirectionalSequenceLstmOperator()
+      : Operator(OperatorType::kBidirectionalSequenceLstm) {}
+  bool merge_outputs;
+};
+
+struct BidirectionalSequenceRnnOperator : Operator {
+  BidirectionalSequenceRnnOperator()
+      : Operator(OperatorType::kBidirectionalSequenceRnn) {}
+  bool merge_outputs;
+};
+
 // Element-wise multiplication operator.
 //
 // Inputs:
@@ -670,6 +694,17 @@ struct MulOperator : Operator {
 // TensorFlow equivalent: Relu
 struct AbsOperator : Operator {
   AbsOperator() : Operator(OperatorType::kAbs) {}
+};
+
+// Elu
+//   f(x) -> exp(x) - 1 for x < 0, x for x >= 0.
+//
+// Inputs:
+//   inputs[0]: required: the input array
+//
+// TensorFlow equivalent: Elu
+struct EluOperator : Operator {
+  EluOperator() : Operator(OperatorType::kElu) {}
 };
 
 // Element-wise Relu operator:
@@ -938,9 +973,8 @@ struct TensorFlowIdentityOperator : Operator {
   TensorFlowIdentityOperator() : Operator(OperatorType::kIdentity) {}
 };
 
-// Batch matrix multiplication operator. This comes from the (deprecated)
-// tf.batch_matmul or a tf.matmul that has rank 3. dims(0) is the batch count
-// and it can be trivially unrolled into a series of matmuls on each element.
+// Batch matrix multiplication operator. This comes from a tf.matmul where one
+// of the operands has rank 3 or more.
 //
 // Inputs:
 //   inputs[0]: required: the left-hand side matrix
@@ -949,6 +983,8 @@ struct TensorFlowIdentityOperator : Operator {
 // TensorFlow equivalent: MatMul
 struct BatchMatMulOperator : Operator {
   BatchMatMulOperator() : Operator(OperatorType::kBatchMatMul) {}
+  bool adj_x = false;
+  bool adj_y = false;
 };
 
 // General matrix multiplication operator. We don't want to support general
@@ -1151,6 +1187,17 @@ struct ExpOperator : Operator {
   ExpOperator() : Operator(OperatorType::kExp) {}
 };
 
+// Given a tensor input, this operation calculates element-wise exponential
+// (y = cos(x)).
+//
+// Inputs:
+//   inputs[0]: required: input tensor
+//
+// TensorFlow equivalent: Cos
+struct CosOperator : Operator {
+  CosOperator() : Operator(OperatorType::kCos) {}
+};
+
 // Given a tensor input, this operation inserts a dimension of 1 at the
 // dimension index axis of input's shape. The dimension index axis starts at
 // zero; if you specify a negative number for axis it is counted backward from
@@ -1229,13 +1276,12 @@ struct RangeOperator : Operator {
 // Inputs:
 //   inputs[0]: required: the input array
 //
-// This operation outputs a 0-D integer tensor representing the rank of
-// the input.
+// This operation outputs a 0-D int32 Tensor representing the rank of input.
 //
-// TensorFlow equivalent: Rank.  We currently assume that the output is int32
-// and not int64.  The output type could be stored herein.
-struct RankOperator : Operator {
-  RankOperator() : Operator(OperatorType::kRank) {}
+// TensorFlow equivalent: Rank.
+struct TensorFlowRankOperator : Operator {
+  TensorFlowRankOperator() : Operator(OperatorType::kRank) {}
+  ArrayDataType output_data_type = ArrayDataType::kInt32;
 };
 
 // Element-wise negation (-x) operator.
@@ -1671,6 +1717,16 @@ struct CeilOperator : Operator {
   CeilOperator() : Operator(OperatorType::kCeil) {}
 };
 
+// Round operator.
+//
+// Inputs:
+//   inputs[0]: required: the input array
+//
+// TensorFlow equivalent: Round
+struct RoundOperator : Operator {
+  RoundOperator() : Operator(OperatorType::kRound) {}
+};
+
 // Gather operator. It gathers slices from params according to indices.
 // Only 1-D indices are supported at the moment.
 //
@@ -1692,10 +1748,22 @@ struct GatherOperator : Operator {
   int input_rank = 0;
 };
 
+// GatherNd operator. It gathers slices from params according to indices.
+//
+// Inputs:
+//   inputs[0]: required: the params array
+//   inputs[1]: required: the indices to gather
+//
+// TensorFlow equivalent: GatherNd
+struct GatherNdOperator : Operator {
+  GatherNdOperator() : Operator(OperatorType::kGatherNd) {}
+};
+
 // ArgMax operator. It returns the index of the maximum value along axis.
 //
 // Inputs:
 //   inputs[0]: required: the input tensor
+//   inputs[1]: optional: 0-D (scalar) axis
 //
 // TensorFlow equivalent: ArgMax
 struct ArgMaxOperator : Operator {
@@ -1707,6 +1775,7 @@ struct ArgMaxOperator : Operator {
 //
 // Inputs:
 //   inputs[0]: required: the input tensor
+//   inputs[1]: optional: 0-D (scalar) axis
 //
 // TensorFlow equivalent: ArgMin
 struct ArgMinOperator : Operator {
@@ -1949,6 +2018,16 @@ struct TensorFlowZerosLikeOperator : Operator {
   TensorFlowZerosLikeOperator() : Operator(OperatorType::kZerosLike) {}
 };
 
+// ReverseV2 operator:
+//
+// Inputs:
+// Inputs[0]: required: the input array.
+//
+// TensorFlow equivalent: ReverseV2.
+struct ReverseV2Operator : Operator {
+  ReverseV2Operator() : Operator(OperatorType::kReverseV2) {}
+};
+
 enum class MirrorPadMode { kNone, kSymmetric, kReflect };
 
 // MirrorPad Operator:
@@ -1964,6 +2043,19 @@ struct MirrorPadOperator : Operator {
   MirrorPadOperator() : Operator(OperatorType::kMirrorPad) {}
   // mode is either SYMMETRIC or REFLECT.
   MirrorPadMode mode;
+};
+
+// ReverseSequence operator:
+//
+// Inputs:
+// Inputs[0]: required: the input array.
+// Inputs[1]: required: the lengths of the elements to be reversed.
+//
+// TensorFlow equivalent: tf.reverse_sequence.
+struct ReverseSequenceOperator : Operator {
+  ReverseSequenceOperator() : Operator(OperatorType::kReverseSequence) {}
+  int seq_dim;
+  int batch_dim = 0;
 };
 
 // Unique Operator:
@@ -1982,6 +2074,36 @@ struct UnidirectionalSequenceRnnOperator : Operator {
       : Operator(OperatorType::kUnidirectionalSequenceRnn) {}
   bool time_major;
   FusedActivationFunctionType fused_activation_function;
+};
+
+// Where Operator:
+// Return the coordinates of the true values in condition tensor in row-major
+// order.
+//
+// Inputs:
+//  inputs[0]: required: boolean condition tensor
+//
+//  TensorFlow equivalent: Where
+struct WhereOperator : Operator {
+  WhereOperator() : Operator(OperatorType::kWhere) {}
+};
+
+// Matrix Diag Operator:
+// Construct a batched diagonal tensor with given batched diagonal values.
+// Inputs: A tensor of values that will be on the diagonal of the returned
+//         tensor.
+struct MatrixDiagOperator : Operator {
+  MatrixDiagOperator() : Operator(OperatorType::kMatrixDiag) {}
+};
+
+// Matrix Set Diag Operator:
+// Construct a batched diagonal tensor with given input and diagonal values.
+// Input is a rank (k+1) tensor of values.
+// diagonal is a rank (k) tensor of values that will be on the diagonal
+// of the returned output. Output is rank k+1.
+//         tensor.
+struct MatrixSetDiagOperator : Operator {
+  MatrixSetDiagOperator() : Operator(OperatorType::kMatrixSetDiag) {}
 };
 
 // Alloc's are used for transient arrays only. An Alloc specifies which interval

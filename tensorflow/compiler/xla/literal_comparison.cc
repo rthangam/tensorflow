@@ -200,23 +200,6 @@ int64 RecursiveElementCount(const Shape& shape) {
   }
 }
 
-// Returns whether the actual and expected values are mismatched with respect to
-// nans. 'relaxed_nans' is interpreted as in xla::ErrorSpec.
-template <typename NativeT>
-bool NanMismatch(NativeT expected, NativeT actual, bool relaxed_nans) {
-  if (relaxed_nans) {
-    return !std::isnan(expected) && std::isnan(actual);
-  } else {
-    return std::isnan(expected) != std::isnan(actual);
-  }
-}
-
-template <>
-bool NanMismatch<half>(half expected, half actual, bool relaxed_nans) {
-  return NanMismatch<float>(static_cast<float>(expected),
-                            static_cast<float>(actual), relaxed_nans);
-}
-
 // Returns whether the given value is infinity.
 template <typename NativeT>
 bool IsInf(NativeT val) {
@@ -226,6 +209,17 @@ bool IsInf(NativeT val) {
 template <>
 bool IsInf<half>(half val) {
   return std::isinf(static_cast<float>(val));
+}
+
+// Returns whether the given value is nan.
+template <typename NativeT>
+float IsNan(NativeT value) {
+  return std::isnan(value);
+}
+
+template <>
+float IsNan(half value) {
+  return IsNan<float>(static_cast<float>(value));
 }
 
 // Converts the given floating-point value to a string.
@@ -244,21 +238,20 @@ string FpValueToString<complex128>(complex128 value) {
   return absl::StrFormat("%8.4g + %8.4fi", value.real(), value.imag());
 }
 
-// Returns the absolute value of the given floating point value. This function
-// is used instead of std::abs directly in order to allow type-dependent
-// implementations for NearComparator.
+// A wrapper of std::abs to include data types that are not supported by
+// std::abs, in particular, bfloat16 and half.
 template <typename NativeT>
-float FpAbsoluteValue(NativeT value) {
+double FpAbsoluteValue(NativeT value) {
   return std::abs(value);
 }
 
 template <>
-float FpAbsoluteValue(bfloat16 value) {
+double FpAbsoluteValue(bfloat16 value) {
   return FpAbsoluteValue<float>(static_cast<float>(value));
 }
 
 template <>
-float FpAbsoluteValue(half value) {
+double FpAbsoluteValue(half value) {
   return FpAbsoluteValue<float>(static_cast<float>(value));
 }
 
@@ -284,8 +277,8 @@ class NearComparator {
   struct Mismatch {
     NativeT actual;
     NativeT expected;
-    float rel_error;
-    float abs_error;
+    double rel_error;
+    double abs_error;
 
     // The linear index of the failure within the shape. This linear index is
     // from the 'actual' literal.
@@ -346,7 +339,7 @@ class NearComparator {
   void UpdateAbsValueBucket(NativeT value, bool is_mismatch) {
     // Adjust the bucket containing the absolute values of the 'actual'
     // elements.
-    const float abs_value = FpAbsoluteValue(value);
+    const double abs_value = FpAbsoluteValue(value);
     for (int i = 0; i < abs_value_buckets_.size(); ++i) {
       if (i == abs_value_buckets_.size() - 1 ||
           (abs_value >= kAbsValueBucketBounds[i] &&
@@ -376,21 +369,39 @@ class NearComparator {
   // the given literal_index and keeps track of various mismatch statistics.
   template <typename T>
   void CompareValues(T expected, T actual, int64 linear_index) {
-    const bool is_nan_mismatch =
-        NanMismatch(expected, actual, error_.relaxed_nans);
-    float abs_error;
-    float rel_error;
+    double abs_error;
+    double rel_error;
     if (CompareEqual<T>(expected, actual, {linear_index})) {
       abs_error = 0;
       rel_error = 0;
-    } else if (is_nan_mismatch) {
-      num_nan_mismatches_++;
-      // A nan mismatch is considered to have infinite error. rel_error is used
-      // for sorting a std::set of the top mismatchs, and a nan value here will
-      // result in undefined behavior because nan's do not satisfy the strict
-      // weak ordering requirement of std containers.
-      abs_error = std::numeric_limits<float>::infinity();
-      rel_error = std::numeric_limits<float>::infinity();
+    } else if (IsNan(expected) || IsNan(actual)) {
+      if ((!error_.relaxed_nans && IsNan(expected) != IsNan(actual)) ||
+          (error_.relaxed_nans && !IsNan(expected) && IsNan(actual))) {
+        num_nan_mismatches_++;
+        // A nan mismatch is considered to have infinite error. rel_error is
+        // used for sorting a std::set of the top mismatchs, and a nan value
+        // here will result in undefined behavior because nan's do not satisfy
+        // the strict weak ordering requirement of std containers.
+        abs_error = std::numeric_limits<float>::infinity();
+        rel_error = std::numeric_limits<float>::infinity();
+      } else {
+        abs_error = 0;
+        rel_error = 0;
+      }
+    } else if (IsInf(actual) && !IsInf(expected) && error_.fewer_infs_ok) {
+      // `fewer_infs_ok` gives us the option of comparing as though `actual`
+      // were float_max/min rather than inf.
+      T actual_finite = actual > T{0} ? std::numeric_limits<T>::max()
+                                      : std::numeric_limits<T>::lowest();
+      abs_error = FpAbsoluteValue(actual_finite - expected);
+
+      // Avoid division by 0 even though it's well-defined because ubsan can be
+      // configured to treat this as a fatal error.
+      if (expected != T{0}) {
+        rel_error = abs_error / FpAbsoluteValue(expected);
+      } else {
+        rel_error = std::numeric_limits<float>::infinity();
+      }
     } else if (IsInf(expected) || IsInf(actual)) {
       // If either the expected or actual value is infinity but not both,
       // then both absolute and relative error are regarded as inifity.
@@ -410,8 +421,7 @@ class NearComparator {
     }
     const bool is_abs_mismatch = abs_error > error_.abs;
     const bool is_rel_mismatch = rel_error > error_.rel;
-    const bool is_mismatch =
-        is_nan_mismatch || (is_abs_mismatch && is_rel_mismatch);
+    const bool is_mismatch = is_abs_mismatch && is_rel_mismatch;
 
     // Update the error of the relative bucket only if the *absolute* error
     // bound is exceeded and vice versa.
@@ -448,48 +458,30 @@ class NearComparator {
 
   // For complex types, we compare real and imaginary parts individually.
   void CompareValues(complex64 expected, complex64 actual, int64 linear_index) {
-    bool mismatch = false;
+    const auto both_parts_mismatch = num_mismatches_ + 2;
     CompareValues<float>(expected.real(), actual.real(), linear_index);
-    if (mismatches_.data<bool>()[linear_index] == true) {
-      mismatch = true;
-      // Delay the mismatch count increase for real part, instead increase
-      // mismatch by 1 for the entire complex number.
-      num_mismatches_--;
-    }
     CompareValues<float>(expected.imag(), actual.imag(), linear_index);
-    if (mismatches_.data<bool>()[linear_index] == true) {
-      mismatch = true;
-      // Delay the mismatch count increase for imag part, instead increase
-      // mismatch by 1 for the entire complex number.
+    if (num_mismatches_ == both_parts_mismatch) {
+      // The mismatch counter had been incremented by each CompareValues() call,
+      // which means that both real and imaginary parts of the passed-in complex
+      // values are different. However, the counter should reflect a single
+      // mismatch between these complex values.
       num_mismatches_--;
     }
-    if (mismatch == true) {
-      num_mismatches_++;
-    }
-    mismatches_.data<bool>()[linear_index] = mismatch;
   }
 
   void CompareValues(complex128 expected, complex128 actual,
                      int64 linear_index) {
-    bool mismatch = false;
+    const auto both_parts_mismatch = num_mismatches_ + 2;
     CompareValues<double>(expected.real(), actual.real(), linear_index);
-    if (mismatches_.data<bool>()[linear_index] == true) {
-      mismatch = true;
-      // Delay the mismatch count increase for real part, instead increase
-      // mismatch by 1 for the entire complex number.
-      num_mismatches_--;
-    }
     CompareValues<double>(expected.imag(), actual.imag(), linear_index);
-    if (mismatches_.data<bool>()[linear_index] == true) {
-      mismatch = true;
-      // Delay the mismatch count increase for imag part, instead increase
-      // mismatch by 1 for the entire complex number.
+    if (num_mismatches_ == both_parts_mismatch) {
+      // The mismatch counter had been incremented by each CompareValues() call,
+      // which means that both real and imaginary parts of the passed-in complex
+      // values are different. However, the counter should reflect a single
+      // mismatch between these complex values.
       num_mismatches_--;
     }
-    if (mismatch == true) {
-      num_mismatches_++;
-    }
-    mismatches_.data<bool>()[linear_index] = mismatch;
   }
 
   // Compares the two literals elementwise.
@@ -670,14 +662,23 @@ Status EqualHelper(const LiteralSlice& expected, const LiteralSlice& actual) {
     case PRED:
       result = Equal<bool>(expected, actual, index, 0);
       break;
-    case U8:
-      result = Equal<uint8>(expected, actual, index, 0);
+    case S8:
+      result = Equal<int8>(expected, actual, index, 0);
+      break;
+    case S16:
+      result = Equal<int16>(expected, actual, index, 0);
       break;
     case S32:
       result = Equal<int32>(expected, actual, index, 0);
       break;
     case S64:
       result = Equal<int64>(expected, actual, index, 0);
+      break;
+    case U8:
+      result = Equal<uint8>(expected, actual, index, 0);
+      break;
+    case U16:
+      result = Equal<uint16>(expected, actual, index, 0);
       break;
     case U32:
       result = Equal<uint32>(expected, actual, index, 0);
@@ -725,7 +726,7 @@ Status EqualHelper(const LiteralSlice& expected, const LiteralSlice& actual) {
 // via recursion. shape_index is the ShapeIndex of expected (or actual)
 // currently being compared.
 Status NearHelper(const LiteralSlice& expected, const LiteralSlice& actual,
-                  const ErrorSpec& error, bool detailed_message,
+                  const ErrorSpec& error, absl::optional<bool> detailed_message,
                   const MiscompareCallback& miscompare_callback,
                   const ShapeIndex& shape_index) {
   TF_RETURN_IF_ERROR(EqualShapes(expected.shape(), actual.shape()));
@@ -766,30 +767,32 @@ Status NearHelper(const LiteralSlice& expected, const LiteralSlice& actual,
 
   if (ShapeUtil::ElementIsFloating(expected.shape()) ||
       ShapeUtil::ElementIsComplex(expected.shape())) {
+    bool use_detailed_message = detailed_message.value_or(
+        ShapeUtil::ElementsIn(expected.shape()) >= 64);
     switch (expected.shape().element_type()) {
       case BF16:
         return NearComparator<bfloat16>::Compare(
-            expected, actual, error, detailed_message, miscompare_callback);
+            expected, actual, error, use_detailed_message, miscompare_callback);
         break;
       case F16:
         return NearComparator<half>::Compare(
-            expected, actual, error, detailed_message, miscompare_callback);
+            expected, actual, error, use_detailed_message, miscompare_callback);
         break;
       case F32:
         return NearComparator<float>::Compare(
-            expected, actual, error, detailed_message, miscompare_callback);
+            expected, actual, error, use_detailed_message, miscompare_callback);
         break;
       case F64:
         return NearComparator<double>::Compare(
-            expected, actual, error, detailed_message, miscompare_callback);
+            expected, actual, error, use_detailed_message, miscompare_callback);
         break;
       case C64:
         return NearComparator<complex64>::Compare(
-            expected, actual, error, detailed_message, miscompare_callback);
+            expected, actual, error, use_detailed_message, miscompare_callback);
         break;
       case C128:
         return NearComparator<complex128>::Compare(
-            expected, actual, error, detailed_message, miscompare_callback);
+            expected, actual, error, use_detailed_message, miscompare_callback);
         break;
       default:
         LOG(FATAL) << "Unsupported primitive type in near comparator: "
@@ -880,7 +883,7 @@ Status Equal(const LiteralSlice& expected, const LiteralSlice& actual) {
 }
 
 Status Near(const LiteralSlice& expected, const LiteralSlice& actual,
-            const ErrorSpec& error, bool detailed_message,
+            const ErrorSpec& error, absl::optional<bool> detailed_message,
             const MiscompareCallback& miscompare_callback) {
   VLOG(1) << "Expected literal:";
   XLA_VLOG_LINES(1, expected.ToString());

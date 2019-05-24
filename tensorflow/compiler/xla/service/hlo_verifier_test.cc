@@ -155,17 +155,17 @@ TEST_F(HloVerifierTest, ResetsShapeVerifierState) {
 
 TEST_F(HloVerifierTest, CheckCallOperandParameterShapesMismatch) {
   const char* const hlo_string = R"(
-HloModule Module
+  HloModule Module
 
-callme {
-  ROOT param = (s32[], f32[4]) parameter(0)
-}
+  callme {
+    ROOT param = (s32[], f32[4]) parameter(0)
+  }
 
-ENTRY entry {
-  p0 = (f32[4], s32[]) parameter(0)
-  ROOT mycall = (s32[], f32[4]) call(p0), to_apply=callme
-}
-)";
+  ENTRY entry {
+    p0 = (f32[4], s32[]) parameter(0)
+    ROOT mycall = (s32[], f32[4]) call(p0), to_apply=callme
+  }
+  )";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseHloString(hlo_string));
 
   auto status = verifier().Run(module.get()).status();
@@ -176,31 +176,76 @@ ENTRY entry {
 
 TEST_F(HloVerifierTest, CheckConditionalOperandParameterShapesMismatch) {
   const char* const hlo_string = R"(
-HloModule Module
+  HloModule Module
 
-true_branch {
-  tparam = (s32[], f32[4]) parameter(0)
-  ROOT tgte1 = f32[4] get-tuple-element(tparam), index=1
-}
+  true_branch {
+    tparam = (s32[], f32[4]) parameter(0)
+    ROOT tgte1 = f32[4] get-tuple-element(tparam), index=1
+  }
 
-false_branch {
-  fparam = (s32[], f32[4]) parameter(0)
-  ROOT fgte1 = f32[4] get-tuple-element(fparam), index=1
-}
+  false_branch {
+    fparam = (s32[], f32[4]) parameter(0)
+    ROOT fgte1 = f32[4] get-tuple-element(fparam), index=1
+  }
 
-ENTRY entry {
-  p0 = (f32[4], s32[]) parameter(0)
-  constant = pred[] constant(true)
-  ROOT conditional = f32[4] conditional(constant, p0, p0),
-    true_computation=true_branch, false_computation=false_branch
-}
-)";
+  ENTRY entry {
+    p0 = (f32[4], s32[]) parameter(0)
+    constant = pred[] constant(true)
+    ROOT conditional = f32[4] conditional(constant, p0, p0),
+      true_computation=true_branch, false_computation=false_branch
+  }
+  )";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseHloString(hlo_string));
 
   auto status = verifier().Run(module.get()).status();
   ASSERT_FALSE(status.ok());
   EXPECT_THAT(status.error_message(),
               HasSubstr("shape does not match parameter"));
+}
+
+TEST_F(HloVerifierTest, CheckConditionalBranchIndexOperandShape) {
+  const char* const hlo_string = R"(
+  HloModule Module
+
+  branch0 {
+    tparam = f32[4] parameter(0)
+    ROOT tgte1 = f32[4] ceil(tparam)
+  }
+
+  branch1 {
+    fparam = f32[4] parameter(0)
+    ROOT fgte1 = f32[4] floor(fparam)
+  }
+
+  branch2 {
+    sparam = f32[4] parameter(0)
+    ROOT sgte1 = f32[4] ceil(sparam)
+  }
+
+  ENTRY entry {
+    p0 = f32[4] parameter(0)
+    b0 = s32[] parameter(1)
+    ROOT conditional = f32[4] conditional(b0, p0, p0, p0),
+      branch_computations={branch0, branch1, branch2}
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseHloString(hlo_string));
+  auto status = verifier().Run(module.get()).status();
+
+  HloInstruction* condition = FindInstruction(module.get(), "b0");
+  *condition->mutable_shape() = ShapeUtil::MakeShape(F32, {});
+  status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(
+      status.error_message(),
+      HasSubstr(
+          "first operand of indexed conditional must be a scalar of S32"));
+
+  *condition->mutable_shape() = ShapeUtil::MakeShape(S32, {4});
+  status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("first operand of conditional must be a scalar"));
 }
 
 TEST_F(HloVerifierTest, RngOpnd0NotScalar) {
@@ -504,7 +549,7 @@ TEST_F(HloVerifierTest, SelectMixedPrecisionNotAllowed) {
   HloModule Module
 
   ENTRY SelectMixedPrecisionNotAllowed {
-   p0 = pred[] parameter(0)
+   p0 = pred[32] parameter(0)
    p1 = f32[32] parameter(1)
    p2 = bf16[32] parameter(2)
    ROOT select = f32[32] select(p0, p1, p2)
@@ -523,7 +568,7 @@ TEST_F(HloVerifierTestAllowMixedPrecision, SelectMixedPrecisionAllowed) {
   HloModule Module
 
   ENTRY SelectMixedPrecisionAllowed {
-   p0 = pred[] parameter(0)
+   p0 = pred[32] parameter(0)
    p1 = f32[32] parameter(1)
    p2 = bf16[32] parameter(2)
    ROOT select = f32[32] select(p0, p1, p2)
@@ -531,6 +576,120 @@ TEST_F(HloVerifierTestAllowMixedPrecision, SelectMixedPrecisionAllowed) {
   )";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseHloString(hlo_string));
 
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_TRUE(status.ok());
+}
+
+TEST_F(HloVerifierTest, SelectTupleNotAllowed) {
+  const char* const hlo_string = R"(
+  HloModule Module
+
+  ENTRY SelectWithTuple {
+    p0 = (f32[], f32[]) parameter(0)
+    p1 = (f32[], f32[]) parameter(1)
+    p2 = pred[] parameter(2)
+    ROOT select = (f32[], f32[]) select(p2, p0, p1)
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseHloString(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("Expected array argument for select"));
+}
+
+TEST_F(HloVerifierTest, IotaNonArrayResult) {
+  const char* const hlo_string = R"(
+  HloModule IotaTupleResult
+
+  ENTRY  kernelEntry {
+    ROOT iota = () iota(), iota_dimension=24
+  }
+  )";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseHloString(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("does not support non-array result"));
+}
+
+TEST_F(HloVerifierTest, IotaNegativeDimension) {
+  const char* const hlo_string = R"(
+  HloModule IotaTupleResult
+
+  ENTRY  kernelEntry {
+    ROOT iota = s32[128,1001]{1,0} iota(), iota_dimension=-1
+  }
+  )";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseHloString(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(), HasSubstr("negative"));
+}
+
+static const char* const kMapOperandComputationMismatchHlo = R"(
+  HloModule MapOperandComputationMismatch
+
+  Computation {
+    param0 = f32[] parameter(0)
+    constant = f32[] constant(1)
+    ROOT add = f32[] add(param0, constant)
+  }
+
+  ENTRY kernelEntry {
+  param = f64[] parameter(0)
+  ROOT map = f32[] map(param), dimensions={}, to_apply=Computation
+})";
+
+TEST_F(HloVerifierTest, MapOperandComputationMismatch) {
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseHloString(kMapOperandComputationMismatchHlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(
+      status.error_message(),
+      HasSubstr(
+          "Shape mismatch between to_apply computation parameter and operand"));
+}
+
+TEST_F(HloVerifierTestAllowMixedPrecision, MapOperandComputationMismatch) {
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseHloString(kMapOperandComputationMismatchHlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_TRUE(status.ok());
+}
+
+static const char* const kReduceOperandComputationMismatchHlo = R"(
+  HloModule ReduceOperandComputationMismatch
+  computation {
+    x = f32[] parameter(0)
+    y = f32[] parameter(1)
+    ROOT add = f32[] add(x, y)
+  }
+
+  ENTRY kernelEntry {
+    arg0 = f16[64,64,224,224]{3,2,1,0} parameter(0)
+    constant = f16[] constant(0)
+    reduce = f16[64]{0} reduce(arg0, constant), dimensions={0,2,3}, to_apply=computation
+  })";
+
+TEST_F(HloVerifierTest, ReduceOperandComputationMismatch) {
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseHloString(kReduceOperandComputationMismatchHlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("Expected instruction to have shape equal to f32[64]"));
+}
+
+TEST_F(HloVerifierTestAllowMixedPrecision, ReduceOperandComputationMismatch) {
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseHloString(kReduceOperandComputationMismatchHlo));
   auto status = verifier().Run(module.get()).status();
   ASSERT_TRUE(status.ok());
 }

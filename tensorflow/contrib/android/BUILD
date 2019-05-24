@@ -11,8 +11,8 @@ exports_files(["LICENSE"])
 
 load(
     "//tensorflow:tensorflow.bzl",
-    "tf_copts",
     "if_android",
+    "tf_copts",
 )
 
 exports_files([
@@ -73,8 +73,7 @@ cc_binary(
         "-z defs",
         "-s",
         "-Wl,--gc-sections",
-        "-Wl,--version-script",  # This line must be directly followed by LINKER_SCRIPT.
-        "$(location {})".format(LINKER_SCRIPT),
+        "-Wl,--version-script,$(location {})".format(LINKER_SCRIPT),
     ]),
     linkshared = 1,
     linkstatic = 1,

@@ -230,9 +230,10 @@ cuda_py_test(
         "//tensorflow/python:platform_test",
     ],
     tags = [
-        # TODO(b/121223043): Re-enable this test on mac after fixing "mean not
-        # defined" errors.
+        # TODO(b/121223043): Re-enable this test after fixing "mean not defined"
+        # errors.
         "no_mac",
+        "no_oss",
         # disable to avoid false positives from scipy.
         "nomsan",
     ],
@@ -289,6 +290,7 @@ cuda_py_test(
         "//tensorflow/python:platform_test",
         "//tensorflow/python:variables",
     ],
+    tags = ["no_oss"],  # b/133229436
     xla_enable_strict_auto_jit = True,
 )
 

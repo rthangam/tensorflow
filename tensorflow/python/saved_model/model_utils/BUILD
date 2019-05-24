@@ -30,6 +30,7 @@ py_library(
     deps = [
         ":export_output",
         ":export_utils",
+        ":mode_keys",
     ],
 )
 
@@ -48,6 +49,7 @@ py_library(
 py_test(
     name = "export_output_test",
     srcs = ["export_output_test.py"],
+    python_version = "PY2",
     srcs_version = "PY2AND3",
     deps = [
         ":export_output",
@@ -70,7 +72,7 @@ py_library(
     srcs_version = "PY2AND3",
     deps = [
         ":export_output",
-        "//tensorflow/python:mode_keys",
+        ":mode_keys",
         "//tensorflow/python:platform",
         "//tensorflow/python:util",
         "//tensorflow/python/saved_model:signature_constants",
@@ -82,6 +84,7 @@ py_library(
 py_test(
     name = "export_test",
     srcs = ["export_test.py"],
+    python_version = "PY2",
     srcs_version = "PY2AND3",
     deps = [
         ":export_utils",
@@ -96,5 +99,22 @@ py_test(
         "//tensorflow/python/keras",
         "//tensorflow/python/saved_model:signature_constants",
         "//tensorflow/python/saved_model:signature_def_utils",
+    ],
+)
+
+py_library(
+    name = "mode_keys",
+    srcs = ["mode_keys.py"],
+    srcs_version = "PY2AND3",
+)
+
+py_test(
+    name = "mode_keys_test",
+    srcs = ["mode_keys_test.py"],
+    python_version = "PY2",
+    srcs_version = "PY2AND3",
+    deps = [
+        ":mode_keys",
+        "//tensorflow/python:client_testlib",
     ],
 )

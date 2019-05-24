@@ -25,7 +25,6 @@ import os
 import numpy as np
 from six.moves import zip  # pylint: disable=redefined-builtin
 
-from tensorflow.python.framework import ops
 from tensorflow.python.keras import backend as K
 from tensorflow.python.keras import optimizers
 from tensorflow.python.keras.saving import model_config as model_config_lib
@@ -33,7 +32,6 @@ from tensorflow.python.keras.utils import conv_utils
 from tensorflow.python.keras.utils.io_utils import ask_to_proceed_with_overwrite
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util import serialization
-from tensorflow.python.util.tf_export import keras_export
 
 # pylint: disable=g-import-not-at-top
 try:
@@ -44,8 +42,7 @@ except ImportError:
 # pylint: enable=g-import-not-at-top
 
 
-@keras_export('keras.models.save_model')
-def save_model(model, filepath, overwrite=True, include_optimizer=True):
+def save_model_to_hdf5(model, filepath, overwrite=True, include_optimizer=True):
   """Saves a model to a HDF5 file.
 
   The saved model contains:
@@ -115,7 +112,7 @@ def save_model(model, filepath, overwrite=True, include_optimizer=True):
             'optimizer attributes or optimizer state '
             'after instantiation. '
             'As a result, we cannot save the optimizer '
-            'as part of the model save file.'
+            'as part of the model save file. '
             'You will have to compile your model again after loading it. '
             'Prefer using a Keras optimizer instead '
             '(see keras.io/optimizers).')
@@ -135,32 +132,15 @@ def save_model(model, filepath, overwrite=True, include_optimizer=True):
             default=serialization.get_json_type).encode('utf8')
 
         # Save optimizer weights.
-        symbolic_weights = getattr(model.optimizer, 'weights')
-        if symbolic_weights:
-          optimizer_weights_group = f.create_group('optimizer_weights')
-          weight_values = K.batch_get_value(symbolic_weights)
-          weight_names = []
-          for w, val in zip(symbolic_weights, weight_values):
-            name = str(w.name)
-            weight_names.append(name.encode('utf8'))
-          optimizer_weights_group.attrs['weight_names'] = weight_names
-          for name, val in zip(weight_names, weight_values):
-            param_dset = optimizer_weights_group.create_dataset(
-                name, val.shape, dtype=val.dtype)
-            if not val.shape:
-              # scalar
-              param_dset[()] = val
-            else:
-              param_dset[:] = val
+        save_optimizer_weights_to_hdf5_group(f, model.optimizer)
     f.flush()
   finally:
     if opened_new_file:
       f.close()
 
 
-@keras_export('keras.models.load_model')
-def load_model(filepath, custom_objects=None, compile=True):  # pylint: disable=redefined-builtin
-  """Loads a model saved via `save_model`.
+def load_model_from_hdf5(filepath, custom_objects=None, compile=True):  # pylint: disable=redefined-builtin
+  """Loads a model saved via `save_model_to_hdf5`.
 
   Arguments:
       filepath: One of the following:
@@ -271,14 +251,7 @@ def load_model(filepath, custom_objects=None, compile=True):  # pylint: disable=
         # weights.
         if model._is_graph_network:  # pylint: disable=protected-access
           model._make_train_function()
-          optimizer_weights_group = f['optimizer_weights']
-          optimizer_weight_names = [
-              n.decode('utf8')
-              for n in optimizer_weights_group.attrs['weight_names']
-          ]
-          optimizer_weight_values = [
-              optimizer_weights_group[n] for n in optimizer_weight_names
-          ]
+          optimizer_weight_values = load_optimizer_weights_from_hdf5_group(f)
           try:
             model.optimizer.set_weights(optimizer_weight_values)
           except ValueError:
@@ -655,6 +628,45 @@ def _convert_rnn_weights(layer, weights):
   return weights
 
 
+def save_optimizer_weights_to_hdf5_group(hdf5_group, optimizer):
+  """Saves optimizer weights of a optimizer to a HDF5 group.
+
+  Arguments:
+      hdf5_group: HDF5 group.
+      optimizer: optimizer instance.
+  """
+
+  symbolic_weights = getattr(optimizer, 'weights')
+  if symbolic_weights:
+    weights_group = hdf5_group.create_group('optimizer_weights')
+    weight_names = [str(w.name).encode('utf8') for w in symbolic_weights]
+    save_attributes_to_hdf5_group(weights_group, 'weight_names', weight_names)
+    weight_values = K.batch_get_value(symbolic_weights)
+    for name, val in zip(weight_names, weight_values):
+      param_dset = weights_group.create_dataset(
+          name, val.shape, dtype=val.dtype)
+      if not val.shape:
+        # scalar
+        param_dset[()] = val
+      else:
+        param_dset[:] = val
+
+
+def load_optimizer_weights_from_hdf5_group(hdf5_group):
+  """Load optimizer weights from a HDF5 group.
+
+  Arguments:
+      hdf5_group: A pointer to a HDF5 group.
+
+  Returns:
+      data: List of optimizer weight names.
+  """
+  weights_group = hdf5_group['optimizer_weights']
+  optimizer_weight_names = load_attributes_from_hdf5_group(
+      weights_group, 'weight_names')
+  return [weights_group[weight_name] for weight_name in optimizer_weight_names]
+
+
 def save_weights_to_hdf5_group(f, layers):
   """Saves the weights of a list of layers to a HDF5 group.
 
@@ -669,25 +681,11 @@ def save_weights_to_hdf5_group(f, layers):
   f.attrs['backend'] = K.backend().encode('utf8')
   f.attrs['keras_version'] = str(keras_version).encode('utf8')
 
-  # On TPUs, modifying the graph between session.runs() triggers some expensive
-  # recompilation overhead. To avoid this, we build up the full set of tensors
-  # to save before fetching weights, thus only modifying the graph once.
-  layer_weights_dict = {}
-  for layer in layers:
-    layer_weights_dict[layer.name] = [ops.convert_to_tensor(w)
-                                      for w in layer.weights]
-
   for layer in layers:
     g = f.create_group(layer.name)
-    symbolic_weights = layer_weights_dict[layer.name]
-    weight_values = K.batch_get_value(symbolic_weights)
-    weight_names = []
-    for i, (w, val) in enumerate(zip(symbolic_weights, weight_values)):
-      if hasattr(w, 'name') and w.name:
-        name = str(w.name)
-      else:
-        name = 'param_' + str(i)
-      weight_names.append(name.encode('utf8'))
+    weights = _legacy_weights(layer)
+    weight_values = K.batch_get_value(weights)
+    weight_names = [w.name.encode('utf8') for w in weights]
     save_attributes_to_hdf5_group(g, 'weight_names', weight_names)
     for name, val in zip(weight_names, weight_values):
       param_dset = g.create_dataset(name, val.shape, dtype=val.dtype)
@@ -720,7 +718,7 @@ def load_weights_from_hdf5_group(f, layers):
 
   filtered_layers = []
   for layer in layers:
-    weights = layer.weights
+    weights = _legacy_weights(layer)
     if weights:
       filtered_layers.append(layer)
 
@@ -746,7 +744,7 @@ def load_weights_from_hdf5_group(f, layers):
     weight_names = load_attributes_from_hdf5_group(g, 'weight_names')
     weight_values = [np.asarray(g[weight_name]) for weight_name in weight_names]
     layer = filtered_layers[k]
-    symbolic_weights = layer.weights
+    symbolic_weights = _legacy_weights(layer)
     weight_values = preprocess_weights_for_loading(
         layer, weight_values, original_keras_version, original_backend)
     if len(weight_values) != len(symbolic_weights):
@@ -803,7 +801,7 @@ def load_weights_from_hdf5_group_by_name(f, layers):
     weight_values = [np.asarray(g[weight_name]) for weight_name in weight_names]
 
     for layer in index.get(name, []):
-      symbolic_weights = layer.weights
+      symbolic_weights = _legacy_weights(layer)
       weight_values = preprocess_weights_for_loading(
           layer, weight_values, original_keras_version, original_backend)
       if len(weight_values) != len(symbolic_weights):
@@ -893,3 +891,24 @@ def load_attributes_from_hdf5_group(group, name):
           [n.decode('utf8') for n in group.attrs['%s%d' % (name, chunk_id)]])
       chunk_id += 1
   return data
+
+
+def _legacy_weights(model):
+  """DO NOT USE.
+
+  For legacy reason, the model.weights was in the order of
+  [self.trainable_weights + self.non_trainable_weights], and this order was
+  used for preserving the weights in h5 format. The new order of model.weights
+  are the same as model.get_weights() which is more intuitive for user. To
+  keep supporting the existing saved h5 file, this method should be used to
+  save/load weights. In future version, we will delete this method and
+  introduce a breaking change for h5 and stay with the new order for weights.
+
+  Args:
+    model: a model or layer instance.
+
+  Returns:
+    A list of variables with the order of trainable_weights, followed by
+      non_trainable_weights.
+  """
+  return model.trainable_weights + model.non_trainable_weights

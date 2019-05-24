@@ -20,8 +20,8 @@ exports_files([
 load(
     "//tensorflow:tensorflow.bzl",
     "if_ios",
-    "tf_generate_proto_text_sources",
     "tf_cc_test",
+    "tf_generate_proto_text_sources",
 )
 
 # For platform specific build config
@@ -50,7 +50,7 @@ cc_library(
     copts = if_ios(["-DGOOGLE_LOGGING"]),
     linkopts = select({
         "//tensorflow:windows": [],
-        "//tensorflow:darwin": [
+        "//tensorflow:macos": [
             "-lm",
             "-lpthread",
         ],

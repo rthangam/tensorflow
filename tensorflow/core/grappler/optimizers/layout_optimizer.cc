@@ -65,8 +65,10 @@ std::set<string> GetOpsFormatSupported() {
       "DepthwiseConv2dNativeBackpropFilter",
       "FusedBatchNorm",
       "FusedBatchNormV2",
+      "FusedBatchNormV3",
       "FusedBatchNormGrad",
       "FusedBatchNormGradV2",
+      "FusedBatchNormGradV3",
       "FusedConv2DBiasActivation",
       "MaxPool",
       "MaxPoolV2",
@@ -578,8 +580,8 @@ class NodeProcessor : public GraphProcessor {
     string device;
     string not_used;
     if (DeviceNameUtils::SplitDeviceName(device_name, &not_used, &device) &&
-        str_util::StrContains(str_util::Lowercase(device),
-                              str_util::Lowercase(DEVICE_GPU))) {
+        absl::StrContains(absl::AsciiStrToLower(device),
+                          absl::AsciiStrToLower(DEVICE_GPU))) {
       return true;
     }
     return false;
@@ -2048,8 +2050,10 @@ class DataLayoutOptimizer : GraphProcessor {
     // only needs to be performed if at least one node in the previous pass is
     // expanded.
     if (graph_->node_size() > node_size_original) {
-      NodeDef* n = AddNodePermNHWCToNCHW();
-      n = AddNodePermNCHWToNHWC();
+      // Create Const nodes holding the permutation used by added Transposes of
+      // nodes not in a frame.
+      AddNodePermNHWCToNCHW();
+      AddNodePermNCHWToNHWC();
       std::set<string> ops_format_agnostic = GetOpsFormatAgnostic();
       for (int i = 0; i < graph_->node_size(); i++) {
         if (ops_format_agnostic.find(graph_->node(i).op()) !=
@@ -2196,35 +2200,26 @@ Status LayoutOptimizer::Tune(const GrapplerItem& item,
 Status LayoutOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
                                  GraphDef* output) {
   if (cluster == nullptr) {
-    return errors::InvalidArgument("cluster == nullptr");
+    LOG(WARNING) << "layout optimizer was called with cluster == nullptr";
+    return errors::Aborted("cluster == nullptr.");
   }
-
   if (GetNumGPUs(*cluster) < 1) {
-    // LayoutOptimizer is currently only tuned for GPU.
-    *output = item.graph;
-    return Status::OK();
+    return errors::Aborted(
+        "No GPUs found: LayoutOptimizer is currently only tuned for GPU.");
   }
 
-  virtual_placer_.reset(new VirtualPlacer(cluster));
-  nodes_to_preserve_ = item.NodesToPreserve();
   GraphProperties graph_properties(item);
-  auto status = graph_properties.InferStatically(false);
-  if (!status.ok()) {
-    VLOG(1) << "Infer shape return status: " << status.ToString();
-    *output = item.graph;
-    return status;
-  }
+  TF_RETURN_IF_ERROR(graph_properties.InferStatically(false));
   GRAPPLER_RETURN_IF_DEADLINE_EXCEEDED();
+
+  virtual_placer_.reset(new VirtualPlacer(cluster->GetDevices()));
+  nodes_to_preserve_ = item.NodesToPreserve();
 
   TuningConfig config;
   config.no_gemm = true;
   // TODO(yaozhang): Enable tuning with various TuningConfig choices with
   // the measurement-based estimator.
-  status = Tune(item, graph_properties, config, output);
-  if (!status.ok()) {
-    *output = item.graph;
-  }
-  return status;
+  return Tune(item, graph_properties, config, output);
 }
 
 void LayoutOptimizer::Feedback(Cluster* cluster, const GrapplerItem& item,

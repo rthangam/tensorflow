@@ -9,9 +9,9 @@ licenses(["notice"])  # Apache 2.0
 
 load(
     "//tensorflow:tensorflow.bzl",
+    "if_windows",
     "tf_cc_test",
     "tf_copts",
-    "if_windows",
 )
 
 cc_library(
@@ -151,6 +151,7 @@ cc_library(
         ":retrying_utils",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "@com_google_absl//absl/strings",
         "@jsoncpp_git//:jsoncpp",
     ],
 )

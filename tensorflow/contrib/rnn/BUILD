@@ -12,12 +12,12 @@ load("//tensorflow:tensorflow.bzl", "cuda_py_tests")
 load("//tensorflow:tensorflow.bzl", "tf_custom_op_py_library")
 load(
     "//tensorflow:tensorflow.bzl",
-    "tf_custom_op_library",
     "tf_cc_test",
-    "tf_py_test",
+    "tf_custom_op_library",
     "tf_gen_op_libs",
-    "tf_kernel_library",
     "tf_gen_op_wrapper_py",
+    "tf_kernel_library",
+    "tf_py_test",
 )
 
 cc_library(
@@ -99,27 +99,8 @@ cuda_py_tests(
         "//tensorflow/python:variable_scope",
         "//tensorflow/python:variables",
     ],
+    tags = ["optonly"],
     xla_enabled = True,
-)
-
-cuda_py_tests(
-    name = "core_rnn_cell_test",
-    size = "medium",
-    srcs = ["python/kernel_tests/core_rnn_cell_test.py"],
-    additional_deps = [
-        ":rnn_py",
-        "//third_party/py/numpy",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:init_ops",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:rnn",
-        "//tensorflow/python:rnn_cell",
-        "//tensorflow/python:variable_scope",
-        "//tensorflow/python:variables",
-        "@absl_py//absl/testing:parameterized",
-    ],
 )
 
 cuda_py_tests(
@@ -142,32 +123,6 @@ cuda_py_tests(
     tags = [
         "optonly",
     ],
-)
-
-cuda_py_tests(
-    name = "core_rnn_test",
-    size = "medium",
-    srcs = ["python/kernel_tests/core_rnn_test.py"],
-    additional_deps = [
-        ":rnn_py",
-        "//third_party/py/numpy",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:control_flow_ops",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:gradients",
-        "//tensorflow/python:init_ops",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform",
-        "//tensorflow/python:rnn",
-        "//tensorflow/python:tensor_array_ops",
-        "//tensorflow/python:util",
-        "//tensorflow/python:variable_scope",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:context",
-    ],
-    shard_count = 10,
 )
 
 tf_py_test(
@@ -228,8 +183,10 @@ tf_custom_op_library(
         "kernels/lstm_ops.h",
     ],
     deps = [
-        "//tensorflow/core/kernels:eigen_contraction_kernel",
-        "//tensorflow/core/kernels:eigen_helpers",
+        # _lstm_ops.so and _gru_ops.so cannot both be linked to MKL-DNN,
+        # or there will be duplicate thread_local symbols, which can cause
+        # problems in TensorFlow Transform.
+        "//tensorflow/core/kernels:eigen_helpers_no_mkl",
     ],
 )
 
@@ -253,8 +210,10 @@ tf_custom_op_library(
         "kernels/gru_ops.h",
     ],
     deps = [
-        "//tensorflow/core/kernels:eigen_contraction_kernel",
-        "//tensorflow/core/kernels:eigen_helpers",
+        # _lstm_ops.so and _gru_ops.so cannot both be linked to MKL-DNN,
+        # or there will be duplicate thread_local symbols, which can cause
+        # problems in TensorFlow Transform.
+        "//tensorflow/core/kernels:eigen_helpers_no_mkl",
     ],
 )
 
@@ -387,6 +346,14 @@ tf_kernel_library(
 py_binary(
     name = "checkpoint_convert",
     srcs = ["python/tools/checkpoint_convert.py"],
+    python_version = "PY2",
+    srcs_version = "PY2AND3",
+    deps = [":checkpoint_convert_lib"],
+)
+
+py_library(
+    name = "checkpoint_convert_lib",
+    srcs = ["python/tools/checkpoint_convert.py"],
     srcs_version = "PY2AND3",
     deps = [
         "//tensorflow/core:protos_all_py",
@@ -403,10 +370,11 @@ py_test(
     name = "checkpoint_convert_test",
     size = "small",
     srcs = ["python/tools/checkpoint_convert_test.py"],
+    python_version = "PY2",
     srcs_version = "PY2AND3",
     tags = ["no_pip"],
     deps = [
-        ":checkpoint_convert",
+        ":checkpoint_convert_lib",
         "//tensorflow/python:client_testlib",
         "//tensorflow/python:framework_ops",
         "//tensorflow/python:session",

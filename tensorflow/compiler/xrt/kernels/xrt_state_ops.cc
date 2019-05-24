@@ -122,6 +122,17 @@ REGISTER_KERNEL_BUILDER(Name("XRTReadLiteralAndRelease")
                             .HostMemory("literal"),
                         XRTReadLiteralOp<true, XRTGenericDeviceAccessor>);
 
+REGISTER_KERNEL_BUILDER(Name("XRTReadToTensor")
+                            .Device(DEVICE_XLA_GPU)
+                            .HostMemory("handles")
+                            .HostMemory("tensors"),
+                        XRTReadToTensorOp<XRTGenericDeviceAccessor>);
+REGISTER_KERNEL_BUILDER(Name("XRTReadToTensor")
+                            .Device(DEVICE_XLA_CPU)
+                            .HostMemory("handles")
+                            .HostMemory("tensors"),
+                        XRTReadToTensorOp<XRTGenericDeviceAccessor>);
+
 REGISTER_KERNEL_BUILDER(Name("XRTReleaseAllocationHandle")
                             .Device(DEVICE_XLA_GPU)
                             .HostMemory("handle"),
@@ -135,5 +146,10 @@ REGISTER_KERNEL_BUILDER(Name("XRTReleaseAllAllocations").Device(DEVICE_XLA_GPU),
                         XRTReleaseAllAllocationsOp<XRTGenericDeviceAccessor>);
 REGISTER_KERNEL_BUILDER(Name("XRTReleaseAllAllocations").Device(DEVICE_XLA_CPU),
                         XRTReleaseAllAllocationsOp<XRTGenericDeviceAccessor>);
+
+REGISTER_KERNEL_BUILDER(Name("XRTCompactAllocations").Device(DEVICE_XLA_GPU),
+                        XRTCompactAllocationsOp<XRTGenericDeviceAccessor>);
+REGISTER_KERNEL_BUILDER(Name("XRTCompactAllocations").Device(DEVICE_XLA_CPU),
+                        XRTCompactAllocationsOp<XRTGenericDeviceAccessor>);
 
 }  // namespace tensorflow

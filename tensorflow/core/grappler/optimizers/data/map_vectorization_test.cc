@@ -17,47 +17,59 @@ limitations under the License.
 
 #include "tensorflow/core/framework/attr_value_util.h"
 #include "tensorflow/core/framework/function_testlib.h"
+#include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/grappler/grappler_item.h"
+#include "tensorflow/core/grappler/optimizers/data/function_utils.h"
 #include "tensorflow/core/grappler/optimizers/data/graph_utils.h"
+#include "tensorflow/core/grappler/utils/topological_sort.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/public/session.h"
 
 namespace tensorflow {
 namespace grappler {
 namespace {
 
+constexpr char kConstOp[] = "Const";
+constexpr char kRangeOp[] = "RangeDataset";
+constexpr char kBatchOp[] = "BatchDataset";
+constexpr char kBatchV2Op[] = "BatchDatasetV2";
+constexpr char kExperimentalMapAndBatchOp[] = "ExperimentalMapAndBatchDataset";
+constexpr char kMapOp[] = "MapDataset";
+constexpr char kParallelMapOp[] = "ParallelMapDataset";
+constexpr char kChooseFastestOp[] = "ChooseFastestBranchDataset";
+constexpr char kPrefetchOp[] = "PrefetchDataset";
+constexpr char kAttrNameF[] = "f";
+constexpr char kAttrNameTarguments[] = "Targuments";
+constexpr char kAttrNameOutputTypes[] = "output_types";
+constexpr char kAttrNameOutputShapes[] = "output_shapes";
+constexpr char kAttrNameInterOpParallelism[] = "use_inter_op_parallelism";
+constexpr char kAttrNamePreserveCardinality[] = "preserve_cardinality";
+constexpr char kAttrNameSloppy[] = "sloppy";
+constexpr char kAttrNameValue[] = "value";
+constexpr char kAttrNameDtype[] = "dtype";
+
 using test::function::NDef;
 
-NodeDef* AddConstBoolNode(GraphDef* graph, StringPiece name, bool value) {
-  NodeDef* node = graph->add_node();
-  *node = NDef(/*name=*/name, /*op=*/"Const", /*inputs=*/{},
-               /*attrs=*/{{"value", value}, {"dtype", DT_BOOL}});
-
-  return node;
-}
-
-NodeDef* AddConstInt32Node(GraphDef* graph, StringPiece name, int value) {
-  NodeDef* node = graph->add_node();
-  *node = NDef(/*name=*/name, /*op=*/"Const", /*inputs=*/{},
-               /*attrs=*/{{"value", value}, {"dtype", DT_INT32}});
-
-  return node;
-}
-
-NodeDef* AddConstInt64Node(GraphDef* graph, StringPiece name, int64 value) {
-  NodeDef* node = graph->add_node();
-  *node = NDef(/*name=*/name, /*op=*/"Const", /*inputs=*/{},
-               /*attrs=*/{{"value", value}, {"dtype", DT_INT64}});
-
-  return node;
+Status OptimizeWithMapVectorization(const GrapplerItem& item, GraphDef* output,
+                                    bool use_choose_fastest) {
+  MapVectorization optimizer;
+  RewriterConfig_CustomGraphOptimizer config;
+  if (use_choose_fastest) {
+    (*config.mutable_parameter_map())["use_choose_fastest"].set_s("true");
+  } else {
+    (*config.mutable_parameter_map())["use_choose_fastest"].set_s("false");
+  }
+  TF_RETURN_IF_ERROR(optimizer.Init(&config));
+  return optimizer.Optimize(nullptr, item, output);
 }
 
 // Adds a simple vectorizable map function that is akin to
 // dataset.map(lambda x: tf.identity(x))
-FunctionDef* AddMapFn(GraphDef* graph) {
-  FunctionDef* map_fn = graph->mutable_library()->add_function();
+FunctionDef* AddMapFn(MutableGraphView* graph) {
+  FunctionDef* map_fn = graph->graph()->mutable_library()->add_function();
   *map_fn = FunctionDefHelper::Create(
       /*function_name=*/"map_fn",
       /*in_def=*/{"x: int64"},
@@ -69,77 +81,96 @@ FunctionDef* AddMapFn(GraphDef* graph) {
   return map_fn;
 }
 
-NodeDef* AddMapNode(GraphDef* graph, const string& input_dataset,
-                    bool parallel = false) {
-  NodeDef* map_node = graph->add_node();
-  auto map_fn = AddMapFn(graph);
-
-  if (parallel) {
-    auto num_parallel_calls = AddConstInt32Node(graph, "num_parallel_calls", 8);
-    *map_node =
-        NDef(/*name=*/"map", /*op=*/"ParallelMapDataset",
-             /*inputs=*/{input_dataset, num_parallel_calls->name()},
+NodeDef* AddMapNode(MutableGraphView* graph, const string& input_dataset,
+                    const string& map_fn, int num_parallel_calls = 0) {
+  NodeDef result;
+  if (num_parallel_calls) {
+    auto num_parallel_calls_node =
+        graph_utils::AddScalarConstNode(num_parallel_calls, graph);
+    result =
+        NDef(/*name=*/"map", /*op=*/kParallelMapOp,
+             /*inputs=*/{input_dataset, num_parallel_calls_node->name()},
              /*attrs=*/
-             {{"f", FunctionDefHelper::FunctionRef(map_fn->signature().name())},
-              {"Targuments", gtl::ArraySlice<DataType>({})},
-              {"output_types", gtl::ArraySlice<DataType>({DT_INT64})},
-              {"output_shapes", gtl::ArraySlice<TensorShape>({{}})},
-              {"use_inter_op_parallelism", false},
-              {"sloppy", true},
-              {"preserve_cardinality", true}});
+             {{kAttrNameF, FunctionDefHelper::FunctionRef(map_fn)},
+              {kAttrNameTarguments, gtl::ArraySlice<DataType>({})},
+              {kAttrNameOutputTypes, gtl::ArraySlice<DataType>({DT_INT64})},
+              {kAttrNameOutputShapes, gtl::ArraySlice<TensorShape>({{}})},
+              {kAttrNameInterOpParallelism, false},
+              {kAttrNameSloppy, true},
+              {kAttrNamePreserveCardinality, true}});
   } else {
-    *map_node =
-        NDef(/*name=*/"map", /*op=*/"MapDataset",
+    result =
+        NDef(/*name=*/"map", /*op=*/kMapOp,
              /*inputs=*/{input_dataset},
              /*attrs=*/
-             {{"f", FunctionDefHelper::FunctionRef(map_fn->signature().name())},
-              {"Targuments", gtl::ArraySlice<DataType>({})},
-              {"output_types", gtl::ArraySlice<DataType>({DT_INT64})},
-              {"output_shapes", gtl::ArraySlice<TensorShape>({{}})},
-              {"use_inter_op_parallelism", false},
-              {"preserve_cardinality", true}});
+             {{kAttrNameF, FunctionDefHelper::FunctionRef(map_fn)},
+              {kAttrNameTarguments, gtl::ArraySlice<DataType>({})},
+              {kAttrNameOutputTypes, gtl::ArraySlice<DataType>({DT_INT64})},
+              {kAttrNameOutputShapes, gtl::ArraySlice<TensorShape>({{}})},
+              {kAttrNameInterOpParallelism, false},
+              {kAttrNamePreserveCardinality, true}});
   }
 
-  return map_node;
+  graph_utils::SetUniqueGraphNodeName(result.name(), graph->graph(), &result);
+  return graph->AddNode(std::move(result));
 }
 
-NodeDef* AddBatchNode(GraphDef* graph, const string& input_dataset,
-                      bool v2 = false) {
-  NodeDef* batch_node = graph->add_node();
+NodeDef* AddPrefetchNode(MutableGraphView* graph, const string& input_dataset,
+                         int64 buffer_size) {
+  auto buffer_size_node = graph_utils::AddScalarConstNode(buffer_size, graph);
+  NodeDef result =
+      NDef(/*name=*/"prefetch", /*op=*/kPrefetchOp,
+           /*inputs=*/{input_dataset, buffer_size_node->name()},
+           /*attrs=*/
+           {{kAttrNameOutputTypes, gtl::ArraySlice<DataType>({DT_INT64})},
+            {kAttrNameOutputShapes, gtl::ArraySlice<TensorShape>({{}})}});
 
-  auto batch_size = AddConstInt64Node(graph, "batch_size", 10);
+  return graph->AddNode(std::move(result));
+}
+
+NodeDef* AddBatchNode(MutableGraphView* graph, const string& input_dataset,
+                      bool v2 = false, int64 batch_size = 10) {
+  NodeDef result;
+  auto batch_size_node = graph_utils::AddScalarConstNode(batch_size, graph);
 
   if (v2) {
-    auto drop_remainder = AddConstBoolNode(graph, "drop_remainder", true);
-    *batch_node = NDef(
-        /*name=*/"batch", /*op=*/"BatchDatasetV2",
-        /*inputs=*/{input_dataset, batch_size->name(), drop_remainder->name()},
+    // BatchDatasetV2
+    auto drop_remainder = graph_utils::AddScalarConstNode(true, graph);
+    result = NDef(
+        /*name=*/"batch", /*op=*/kBatchV2Op,
+        /*inputs=*/
+        {input_dataset, batch_size_node->name(), drop_remainder->name()},
         /*attrs=*/
-        {{"output_types", gtl::ArraySlice<DataType>({DT_INT64})},
-         {"output_shapes", gtl::ArraySlice<TensorShape>({{10, 1}})}});
+        {{kAttrNameOutputTypes, gtl::ArraySlice<DataType>({DT_INT64})},
+         {kAttrNameOutputShapes, gtl::ArraySlice<TensorShape>({{10, 1}})}});
   } else {
-    *batch_node = NDef(
-        /*name=*/"batch", /*op=*/"BatchDataset",
-        /*inputs=*/{input_dataset, batch_size->name()},
-        /*attrs=*/
-        {{"output_types", gtl::ArraySlice<DataType>({DT_INT64})},
-         {"output_shapes", gtl::ArraySlice<PartialTensorShape>({{-1, 1}})}});
+    result =
+        NDef(/*name=*/"batch", /*op=*/kBatchOp,
+             /*inputs=*/{input_dataset, batch_size_node->name()},
+             /*attrs=*/
+             {{kAttrNameOutputTypes, gtl::ArraySlice<DataType>({DT_INT64})},
+              {kAttrNameOutputShapes,
+               gtl::ArraySlice<PartialTensorShape>({{v2 ? 10 : -1, 1}})}});
   }
-  return batch_node;
+
+  graph_utils::SetUniqueGraphNodeName(result.name(), graph->graph(), &result);
+  return graph->AddNode(std::move(result));
 }
 
-NodeDef* AddRangeNode(GraphDef* graph) {
-  auto start = AddConstInt64Node(graph, "start", 0);
-  auto stop = AddConstInt64Node(graph, "stop", 10);
-  auto step = AddConstInt64Node(graph, "step", 1);
-  NodeDef* range_node = graph->add_node();
-  *range_node = NDef(/*name=*/"range", /*op=*/"RangeDataset",
-                     /*inputs=*/{start->name(), stop->name(), step->name()},
-                     /*attrs=*/
-                     {{"output_shapes", gtl::ArraySlice<TensorShape>({{}})},
-                      {"output_types", gtl::ArraySlice<DataType>({DT_INT64})}});
+NodeDef* AddRangeNode(MutableGraphView* graph) {
+  auto start = graph_utils::AddScalarConstNode(static_cast<int64>(0), graph);
+  auto stop = graph_utils::AddScalarConstNode(static_cast<int64>(10), graph);
+  auto step = graph_utils::AddScalarConstNode(static_cast<int64>(1), graph);
 
-  return range_node;
+  NodeDef result =
+      NDef(/*name=*/"range", /*op=*/kRangeOp,
+           /*inputs=*/{start->name(), stop->name(), step->name()},
+           /*attrs=*/
+           {{kAttrNameOutputShapes, gtl::ArraySlice<TensorShape>({{}})},
+            {kAttrNameOutputTypes, gtl::ArraySlice<DataType>({DT_INT64})}});
+
+  graph_utils::SetUniqueGraphNodeName(result.name(), graph->graph(), &result);
+  return graph->AddNode(std::move(result));
 }
 
 void CheckNotVectorized(const GraphDef& output, const string& map_op,
@@ -154,65 +185,330 @@ void CheckNotVectorized(const GraphDef& output, const string& map_op,
   EXPECT_EQ(batch_node.input(0), map_node.name());
 }
 
-void CheckVectorized(const GraphDef& output, const string& map_op,
-                     const string& batch_op, const string& map_input_name) {
-  ASSERT_EQ(graph_utils::FindAllGraphNodesWithOp(map_op, output).size(), 1);
-  ASSERT_EQ(graph_utils::FindAllGraphNodesWithOp(batch_op, output).size(), 1);
-  const NodeDef& map_node =
-      output.node(graph_utils::FindGraphNodeWithOp(map_op, output));
-  const NodeDef& batch_node =
-      output.node(graph_utils::FindGraphNodeWithOp(batch_op, output));
-  EXPECT_EQ(map_node.input(0), batch_node.name());
-  EXPECT_EQ(batch_node.input(0), map_input_name);
+void CheckBranch(const FunctionDef& function, gtl::ArraySlice<string> ops) {
+  for (int i = 0, size = ops.size(); i < size; ++i) {
+    EXPECT_EQ(function.node_def(i).op(), ops[i]);
+  }
+}
 
-  // Check that the function is actually vectorized.
-  // The vectorization of the identity function is itself.
-  string function_name = map_node.attr().at("f").func().name();
+const FunctionDef* GetFunction(const GraphDef& graph,
+                               const string& function_name) {
   int found =
-      graph_utils::FindGraphFunctionWithName(function_name, output.library());
-  ASSERT_NE(found, -1);
-  const auto& function = output.library().function(found);
-  EXPECT_EQ(function.node_def(0).op(), "Identity");
+      graph_utils::FindGraphFunctionWithName(function_name, graph.library());
+  if (found == -1) {
+    return nullptr;
+  }
+  return &graph.library().function(found);
+}
+
+void CheckVectorizedWithoutChooseFastest(
+    const GraphDef& output, gtl::ArraySlice<string> expected_vectorized_branch,
+    const string& input_name) {
+  std::vector<const NodeDef*> vectorized_branch;
+  for (const auto& op : expected_vectorized_branch) {
+    // This assumes that vectorized op is the only one that exists in the graph.
+    // For our test cases, this is true (we don't have superfluous map/batch
+    // nodes in other parts of the pipeline).
+    ASSERT_EQ(graph_utils::FindAllGraphNodesWithOp(op, output).size(), 1);
+    vectorized_branch.push_back(
+        &output.node(graph_utils::FindGraphNodeWithOp(op, output)));
+  }
+
+  for (int i = 1; i < vectorized_branch.size() - 1; ++i) {
+    const NodeDef* node = vectorized_branch[i];
+    const NodeDef* next_node = vectorized_branch[i + 1];
+    ASSERT_EQ(next_node->input(0), node->name());
+  }
+  ASSERT_EQ(vectorized_branch[0]->input(0), input_name);
+
+  const NodeDef* vectorized_map_node = vectorized_branch[1];
+  string function_name =
+      vectorized_map_node->attr().at(kAttrNameF).func().name();
+
+  const FunctionDef* function = GetFunction(output, function_name);
+  ASSERT_NE(function, nullptr);
+  EXPECT_EQ(function->node_def(0).op(), "Identity");
+}
+
+// Checks that a graph has undergone the map_vectorization transformation
+// successfully, whereby the new graph has the shape:
+//
+//    input_node -------------> choose_fastest --> ...
+//                               |f0    |f1
+//                               |      |
+//                               |      +---> new batch --> new map
+//                               |
+//                               +--> old map --> old batch
+//
+void CheckVectorizedWithChooseFastest(
+    const GraphDef& output, gtl::ArraySlice<string> expected_vectorized_branch,
+    gtl::ArraySlice<string> expected_original_branch,
+    const string& input_name) {
+  for (const auto& op : {kBatchOp, kBatchV2Op, kMapOp, kParallelMapOp,
+                         kExperimentalMapAndBatchOp}) {
+    // Check that the dataset nodes have been removed from the main graph.
+    ASSERT_EQ(graph_utils::FindAllGraphNodesWithOp(op, output).size(), 0);
+  }
+  ASSERT_EQ(
+      graph_utils::FindAllGraphNodesWithOp(kChooseFastestOp, output).size(), 1);
+  const NodeDef& choose_fastest_node =
+      output.node(graph_utils::FindGraphNodeWithOp(kChooseFastestOp, output));
+  ASSERT_EQ(choose_fastest_node.input(0), input_name);
+
+  const auto& functions_list = choose_fastest_node.attr().at("branches").list();
+
+  // Branch 0: vectorized
+  const FunctionDef* branch_0 =
+      GetFunction(output, functions_list.func(0).name());
+  ASSERT_NE(branch_0, nullptr);
+  CheckBranch(*branch_0, expected_vectorized_branch);
+
+  // Branch 1: original
+  const FunctionDef* branch_1 =
+      GetFunction(output, functions_list.func(1).name());
+  ASSERT_NE(branch_1, nullptr);
+  CheckBranch(*branch_1, expected_original_branch);
+
+  const NodeDef& vectorized_map_node =
+      branch_0->node_def(function_utils::FindFunctionNodeWithOp(
+          expected_vectorized_branch[1], *branch_0));
+  string function_name =
+      vectorized_map_node.attr().at(kAttrNameF).func().name();
+
+  const FunctionDef* function = GetFunction(output, function_name);
+  ASSERT_NE(function, nullptr);
+  EXPECT_EQ(function->node_def(0).op(), "Identity");
 }
 
 class MapThenBatchTest
-    : public ::testing::TestWithParam<std::tuple<bool, bool>> {};
+    : public ::testing::TestWithParam<std::tuple<int, bool, int, bool>> {};
 
 TEST_P(MapThenBatchTest, IsVectorized) {
-  bool use_parallel_map = std::get<0>(GetParam());
+  int num_parallel_calls = std::get<0>(GetParam());
   bool use_batch_v2 = std::get<1>(GetParam());
+  int prefetch = std::get<2>(GetParam());
+  bool use_choose_fastest = std::get<3>(GetParam());
   GrapplerItem item;
-  auto range_node = AddRangeNode(&item.graph);
-  auto map_node = AddMapNode(&item.graph, range_node->name(), use_parallel_map);
-  auto batch_node = AddBatchNode(&item.graph, map_node->name(), use_batch_v2);
-  MapVectorization optimizer;
+  MutableGraphView graph(&item.graph);
+  auto range_dataset = AddRangeNode(&graph);
+  auto map_fn = AddMapFn(&graph);
+  auto dataset = AddMapNode(&graph, range_dataset->name(),
+                            map_fn->signature().name(), num_parallel_calls);
+
+  if (prefetch) {
+    dataset = AddPrefetchNode(&graph, dataset->name(), prefetch);
+  }
+  dataset = AddBatchNode(&graph, dataset->name(), use_batch_v2);
   GraphDef output;
-  TF_ASSERT_OK(optimizer.Optimize(nullptr, item, &output));
-  CheckVectorized(output, map_node->op(), batch_node->op(), range_node->name());
+  TF_ASSERT_OK(OptimizeWithMapVectorization(item, &output, use_choose_fastest));
+
+  std::vector<string> expected_original_branch;
+  expected_original_branch.push_back(num_parallel_calls > 0 ? kParallelMapOp
+                                                            : kMapOp);
+  if (prefetch) {
+    expected_original_branch.push_back(kPrefetchOp);
+  }
+  expected_original_branch.push_back(use_batch_v2 > 0 ? kBatchV2Op : kBatchOp);
+
+  std::vector<string> expected_vectorized_branch;
+  expected_vectorized_branch.push_back(use_batch_v2 > 0 ? kBatchV2Op
+                                                        : kBatchOp);
+  expected_vectorized_branch.push_back(num_parallel_calls > 0 ? kParallelMapOp
+                                                              : kMapOp);
+  if (prefetch) {
+    expected_vectorized_branch.push_back(kPrefetchOp);
+  }
+
+  if (use_choose_fastest) {
+    CheckVectorizedWithChooseFastest(output, expected_vectorized_branch,
+                                     expected_original_branch,
+                                     range_dataset->name());
+
+  } else {
+    CheckVectorizedWithoutChooseFastest(output, expected_vectorized_branch,
+                                        range_dataset->name());
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(MapThenBatchTest, MapThenBatchTest,
-                         ::testing::Combine(::testing::Bool(),
+                         ::testing::Combine(::testing::Values(0, 12),
+                                            ::testing::Bool(),
+                                            ::testing::Values(0, 20),
                                             ::testing::Bool()));
 
-// Not all dataset types have "output_shapes" and "output_types" attrs defined.
-// Add a generic input node which may not have these attrs defined.
-NodeDef* AddArbitraryInputNode(GraphDef* graph,
+class MapAndBatchTest : public ::testing::TestWithParam<bool> {};
+
+NodeDef* AddMapAndBatchNode(MutableGraphView* graph,
+                            const string& input_dataset, const string& map_fn,
+                            int64 batch_size = 10,
+                            int64 num_parallel_calls = 12) {
+  auto batch_size_node = graph_utils::AddScalarConstNode(batch_size, graph);
+  auto num_parallel_calls_node =
+      graph_utils::AddScalarConstNode(num_parallel_calls, graph);
+  auto drop_remainder = graph_utils::AddScalarConstNode(true, graph);
+
+  NodeDef result =
+      NDef(/*name=*/"map_and_batch",
+           /*op=*/kExperimentalMapAndBatchOp,
+           /*inputs=*/
+           {input_dataset, batch_size_node->name(),
+            num_parallel_calls_node->name(), drop_remainder->name()},
+           /*attrs=*/
+           {{kAttrNameF, FunctionDefHelper::FunctionRef(map_fn)},
+            {kAttrNameTarguments, gtl::ArraySlice<DataType>({})},
+            {kAttrNameOutputTypes, gtl::ArraySlice<DataType>({DT_INT64})},
+            {kAttrNameOutputShapes,
+             gtl::ArraySlice<PartialTensorShape>({{10, 1}})}});
+
+  graph_utils::SetUniqueGraphNodeName(result.name(), graph->graph(), &result);
+  return graph->AddNode(std::move(result));
+}
+
+TEST_P(MapAndBatchTest, VectorizeExperimentalMapAndBatch) {
+  GrapplerItem item;
+  MutableGraphView graph(&item.graph);
+  auto range_node = AddRangeNode(&graph);
+  auto map_fn = AddMapFn(&graph);
+  auto map_and_batch_node = AddMapAndBatchNode(&graph, range_node->name(),
+                                               map_fn->signature().name());
+  ASSERT_NE(map_and_batch_node, nullptr);
+
+  GraphDef output;
+  bool use_choose_fastest = GetParam();
+
+  TF_ASSERT_OK(OptimizeWithMapVectorization(item, &output, use_choose_fastest));
+  if (use_choose_fastest) {
+    CheckVectorizedWithChooseFastest(output, {kBatchV2Op, kParallelMapOp},
+                                     {kExperimentalMapAndBatchOp},
+                                     range_node->name());
+  } else {
+    CheckVectorizedWithoutChooseFastest(output, {kBatchV2Op, kParallelMapOp},
+                                        range_node->name());
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(MapAndBatchTest, MapAndBatchTest, ::testing::Bool());
+
+class ChainedMapAndBatchTest
+    : public ::testing::TestWithParam<std::tuple<bool, bool, bool>> {};
+
+// Tests:
+// 1) map.batch.map.batch
+// 2) map.batch.map_and_batch
+// 3) map_and_batch.map.batch
+// 4) map_and_batch.map_and_batch
+TEST_P(ChainedMapAndBatchTest, IsVectorized) {
+  GrapplerItem item;
+  MutableGraphView graph(&item.graph);
+  auto input_node = AddRangeNode(&graph);
+
+  auto map_fn = AddMapFn(&graph);
+
+  auto make_map_and_batch = [&graph, map_fn](NodeDef* input, bool fuse) {
+    if (fuse) {
+      return AddMapAndBatchNode(&graph, input->name(),
+                                map_fn->signature().name());
+    }
+    auto map_node =
+        AddMapNode(&graph, input->name(), map_fn->signature().name(), true);
+    auto batch_node = AddBatchNode(&graph, map_node->name(), true);
+    return batch_node;
+  };
+
+  bool fuse_0 = std::get<0>(GetParam());
+  bool fuse_1 = std::get<1>(GetParam());
+  bool use_choose_fastest = std::get<2>(GetParam());
+  auto map_and_batch_0 = make_map_and_batch(input_node, fuse_0);
+  auto map_and_batch_1 = make_map_and_batch(map_and_batch_0, fuse_1);
+  ASSERT_NE(map_and_batch_1, nullptr);
+
+  GraphDef output;
+  TF_ASSERT_OK(OptimizeWithMapVectorization(item, &output, use_choose_fastest));
+  TF_ASSERT_OK(TopologicalSort(&output));
+
+  if (use_choose_fastest) {
+    std::vector<int> choose_fastest_nodes =
+        graph_utils::FindAllGraphNodesWithOp(kChooseFastestOp, output);
+    ASSERT_EQ(choose_fastest_nodes.size(), 2);
+
+    std::vector<string> fused_sequence({kExperimentalMapAndBatchOp});
+    std::vector<string> unfused_sequence({kParallelMapOp, kBatchV2Op});
+    const NodeDef& range_node =
+        output.node(graph_utils::FindGraphNodeWithOp(kRangeOp, output));
+    const NodeDef& choose_fastest_0 = output.node(choose_fastest_nodes[0]);
+    ASSERT_EQ(choose_fastest_0.input(0), range_node.name());
+    const NodeDef& choose_fastest_1 = output.node(choose_fastest_nodes[1]);
+    ASSERT_EQ(choose_fastest_1.input(0), choose_fastest_0.name());
+
+    auto check_branches = [&output](const NodeDef& choose_fastest_node,
+                                    gtl::ArraySlice<string> original_ops) {
+      const auto& functions_list =
+          choose_fastest_node.attr().at("branches").list();
+
+      // Branch 0: vectorized
+      const FunctionDef* branch_0 =
+          GetFunction(output, functions_list.func(0).name());
+      ASSERT_NE(branch_0, nullptr);
+      CheckBranch(*branch_0, {kBatchV2Op, kParallelMapOp});
+
+      // Branch 1: original
+      const FunctionDef* branch_1 =
+          GetFunction(output, functions_list.func(1).name());
+      ASSERT_NE(branch_1, nullptr);
+      CheckBranch(*branch_1, original_ops);
+    };
+
+    check_branches(choose_fastest_0,
+                   fuse_0 ? fused_sequence : unfused_sequence);
+    check_branches(choose_fastest_1,
+                   fuse_1 ? fused_sequence : unfused_sequence);
+  } else {
+    std::vector<int> map_nodes =
+        graph_utils::FindAllGraphNodesWithOp(kParallelMapOp, output);
+    std::vector<int> batch_nodes =
+        graph_utils::FindAllGraphNodesWithOp(kBatchV2Op, output);
+    ASSERT_EQ(map_nodes.size(), 2);
+    ASSERT_EQ(batch_nodes.size(), 2);
+
+    const NodeDef& range_node =
+        output.node(graph_utils::FindGraphNodeWithOp(kRangeOp, output));
+
+    const NodeDef& batch_node_0 = output.node(batch_nodes[0]);
+    EXPECT_EQ(batch_node_0.input(0), range_node.name());
+    const NodeDef& map_node_0 = output.node(map_nodes[0]);
+    EXPECT_EQ(map_node_0.input(0), batch_node_0.name());
+    const NodeDef& batch_node_1 = output.node(batch_nodes[1]);
+    EXPECT_EQ(batch_node_1.input(0), map_node_0.name());
+    const NodeDef& map_node_1 = output.node(map_nodes[1]);
+    EXPECT_EQ(map_node_1.input(0), batch_node_1.name());
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(ChainedMapAndBatchTest, ChainedMapAndBatchTest,
+                         ::testing::Combine(::testing::Bool(),
+                                            ::testing::Bool(),
+                                            ::testing::Bool()));
+
+// Not all dataset types have "output_shapes" and "output_types"
+// attrs defined. Add a generic input node which may not have these attrs
+// defined.
+NodeDef* AddArbitraryInputNode(MutableGraphView* graph,
                                std::vector<PartialTensorShape>* output_shapes,
                                std::vector<DataType>* output_types) {
-  auto input_node = graph->add_node();
   std::vector<std::pair<string, FunctionDefHelper::AttrValueWrapper>> attrs;
   if (output_shapes) {
-    attrs.push_back({"output_shapes", *output_shapes});
+    attrs.push_back({kAttrNameOutputShapes, *output_shapes});
   }
   if (output_types) {
-    attrs.push_back({"output_types", *output_types});
+    attrs.push_back({kAttrNameOutputTypes, *output_types});
   }
 
-  *input_node = NDef(/*name=*/"input", /*op=*/"InputDataset", /*inputs=*/{},
-                     /*attrs=*/attrs);
+  NodeDef result = NDef(/*name=*/"input", /*op=*/"InputDataset",
+                        /*inputs=*/{},
+                        /*attrs=*/attrs);
 
-  return input_node;
+  graph_utils::SetUniqueGraphNodeName(result.name(), graph->graph(), &result);
+  return graph->AddNode(std::move(result));
 }
 
 TEST(MapVectorizationTest, VectorizeWithUndefinedOutputShapes) {
@@ -220,13 +516,15 @@ TEST(MapVectorizationTest, VectorizeWithUndefinedOutputShapes) {
   // doesn't have an output_shapes attr defined. In this case, the map and
   // batch swap does not occur.
   GrapplerItem item;
+  MutableGraphView graph(&item.graph);
   std::vector<DataType> input_types({DT_INT64});
-  auto input_node = AddArbitraryInputNode(&item.graph, nullptr, &input_types);
-  auto map_node = AddMapNode(&item.graph, input_node->name());
-  auto batch_node = AddBatchNode(&item.graph, map_node->name());
-  MapVectorization optimizer;
+  auto input_node = AddArbitraryInputNode(&graph, nullptr, &input_types);
+  auto map_fn = AddMapFn(&graph);
+  auto map_node =
+      AddMapNode(&graph, input_node->name(), map_fn->signature().name());
+  auto batch_node = AddBatchNode(&graph, map_node->name());
   GraphDef output;
-  TF_ASSERT_OK(optimizer.Optimize(nullptr, item, &output));
+  TF_ASSERT_OK(OptimizeWithMapVectorization(item, &output, true));
   CheckNotVectorized(output, map_node->op(), batch_node->op(),
                      input_node->name());
 }
@@ -236,15 +534,16 @@ TEST(MapVectorizationTest, VectorizeWithUnknownRank) {
   // has components with unknown rank. In this case, the optimization does not
   // occur.
   GrapplerItem item;
+  MutableGraphView graph(&item.graph);
   std::vector<PartialTensorShape> input_shapes({{}});
   std::vector<DataType> input_types({DT_INT64});
-  auto input_node =
-      AddArbitraryInputNode(&item.graph, &input_shapes, &input_types);
-  auto map_node = AddMapNode(&item.graph, input_node->name());
-  auto batch_node = AddBatchNode(&item.graph, map_node->name());
-  MapVectorization optimizer;
+  auto input_node = AddArbitraryInputNode(&graph, &input_shapes, &input_types);
+  auto map_fn = AddMapFn(&graph);
+  auto map_node =
+      AddMapNode(&graph, input_node->name(), map_fn->signature().name());
+  auto batch_node = AddBatchNode(&graph, map_node->name());
   GraphDef output;
-  TF_ASSERT_OK(optimizer.Optimize(nullptr, item, &output));
+  TF_ASSERT_OK(OptimizeWithMapVectorization(item, &output, true));
   CheckNotVectorized(output, map_node->op(), batch_node->op(),
                      input_node->name());
 }
@@ -254,15 +553,16 @@ TEST(MapVectorizationTest, VectorizeWithUnknownDim) {
   // has components with unknown dimensions. In this case, the optimization does
   // not occur.
   GrapplerItem item;
+  MutableGraphView graph(&item.graph);
   std::vector<PartialTensorShape> input_shapes({{-1, 2}});
   std::vector<DataType> input_types({DT_INT64});
-  auto input_node =
-      AddArbitraryInputNode(&item.graph, &input_shapes, &input_types);
-  auto map_node = AddMapNode(&item.graph, input_node->name());
-  auto batch_node = AddBatchNode(&item.graph, map_node->name());
-  MapVectorization optimizer;
+  auto input_node = AddArbitraryInputNode(&graph, &input_shapes, &input_types);
+  auto map_fn = AddMapFn(&graph);
+  auto map_node =
+      AddMapNode(&graph, input_node->name(), map_fn->signature().name());
+  auto batch_node = AddBatchNode(&graph, map_node->name());
   GraphDef output;
-  TF_ASSERT_OK(optimizer.Optimize(nullptr, item, &output));
+  TF_ASSERT_OK(OptimizeWithMapVectorization(item, &output, true));
   CheckNotVectorized(output, map_node->op(), batch_node->op(),
                      input_node->name());
 }
@@ -272,14 +572,19 @@ TEST(MapVectorizationTest, VectorizeWithUndefinedOutputTypes) {
   // an output_types attr defined. The output_types of the input node, even
   // if not present, can be inferred from the map function input signature.
   GrapplerItem item;
+  MutableGraphView graph(&item.graph);
   std::vector<PartialTensorShape> input_shapes({{1}});
-  auto input_node = AddArbitraryInputNode(&item.graph, &input_shapes, nullptr);
-  auto map_node = AddMapNode(&item.graph, input_node->name());
-  auto batch_node = AddBatchNode(&item.graph, map_node->name());
-  MapVectorization optimizer;
+  auto input_node = AddArbitraryInputNode(&graph, &input_shapes, nullptr);
+  auto map_fn = AddMapFn(&graph);
+  auto map_node =
+      AddMapNode(&graph, input_node->name(), map_fn->signature().name());
+  auto batch_node = AddBatchNode(&graph, map_node->name());
   GraphDef output;
-  TF_ASSERT_OK(optimizer.Optimize(nullptr, item, &output));
-  CheckVectorized(output, map_node->op(), batch_node->op(), input_node->name());
+  TF_ASSERT_OK(OptimizeWithMapVectorization(item, &output, true));
+  CheckVectorizedWithChooseFastest(
+      output, /*expected_vectorized_branch=*/{batch_node->op(), map_node->op()},
+      /*expected_original_branch=*/{map_node->op(), batch_node->op()},
+      input_node->name());
 }
 
 // TODO(rachelim): Add test that has a polymorphic function.

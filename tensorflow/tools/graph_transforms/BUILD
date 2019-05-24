@@ -7,12 +7,12 @@ licenses(["notice"])  # Apache 2.0
 
 load(
     "//tensorflow:tensorflow.bzl",
+    "if_not_v2",
     "if_not_windows",
-    "tf_copts",
     "tf_cc_binary",
     "tf_cc_test",
+    "tf_copts",
     "tf_py_test",
-    "if_not_v2",
 )
 
 exports_files(["LICENSE"])
@@ -98,7 +98,6 @@ cc_library(
         "fold_old_batch_norms.cc",
         "freeze_requantization_ranges.cc",
         "fuse_convolutions.cc",
-        "fuse_quantized_convolution.cc",
         "insert_logging.cc",
         "obfuscate_names.cc",
         "quantize_nodes.cc",
@@ -136,6 +135,15 @@ cc_library(
     ] + if_not_windows([
         "//tensorflow/core/kernels:remote_fused_graph_rewriter_transform",
         "//tensorflow/core/kernels/hexagon:hexagon_rewriter_transform",
+        "//tensorflow/core:sparse_ops_op_lib",
+        "//tensorflow/core:parsing_ops_op_lib",
+        "//tensorflow/core:sendrecv_ops_op_lib",
+        "//tensorflow/core:io_ops_op_lib",
+        "//tensorflow/core:logging_ops_op_lib",
+        "//tensorflow/core:lookup_ops_op_lib",
+        "//tensorflow/core:data_flow_ops_op_lib",
+        "//tensorflow/core:no_op_op_lib",
+        "//tensorflow/core:state_ops_op_lib",
         "//tensorflow/core:user_ops_op_lib",
         "//tensorflow/core:training_ops_op_lib",
         "//tensorflow/core:string_ops_op_lib",

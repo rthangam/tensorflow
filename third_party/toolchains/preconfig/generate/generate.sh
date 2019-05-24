@@ -38,8 +38,8 @@ TENSORRT_VERSION="${PLATFORM[5]}"
 # TODO(klimek): Put this into the name.
 
 if [[ -n "${CUDA_VERSION}" ]]; then
-  if [[ "${COMPILER}" == "gcc" ]]; then
-    COMPILER="gcc-nvcc-${CUDA_VERSION}"
+  if [[ "${COMPILER}" == gcc* ]]; then
+    COMPILER="${COMPILER}-nvcc-${CUDA_VERSION}"
   fi
   # Currently we create a special toolchain for clang when compiling with
   # cuda enabled. We can get rid of this once the default toolchain bazel
@@ -59,13 +59,6 @@ echo "TensorRT: ${TENSORRT_VERSION}"
 bazel build --define=mount_project="${PWD}" "${PKG}/generate:${TARGET}"
 cd "${TEMPDIR}"
 tar xvf "${ROOT}/bazel-bin/${PKG}/generate/${TARGET}_outputs.tar"
-
-# TODO(klimek): The skylark config rules should copy the files instead of
-# creating aliases.
-# Other than in @local_config_tensorrt, the header files in the remote config
-# repo are not relative to the repository root. Add a dummy include_prefix to
-# make them available as virtual includes.
-buildozer 'set include_prefix ""' //local_config_tensorrt:%cc_library
 
 # Delete all empty files: configurations leave empty files around when they are
 # unnecessary.
@@ -99,6 +92,7 @@ else
 fi
 
 # Cleanup for copybara.
+find "${OS}" -name '*.h' |xargs clang-format -i
 find "${OS}" -name 'BUILD' -o -name '*.bzl' |xargs buildifier
 find "${OS}" -name 'BUILD' -o -name '*.bzl' |xargs -I {} mv {} {}.oss
 

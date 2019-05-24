@@ -21,6 +21,7 @@ import static org.junit.Assert.fail;
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -60,7 +61,13 @@ public final class InterpreterTest {
   @Test
   public void testInterpreterWithOptions() throws Exception {
     Interpreter interpreter =
-        new Interpreter(MODEL_FILE, new Interpreter.Options().setNumThreads(2).setUseNNAPI(true));
+        new Interpreter(
+            MODEL_FILE,
+            new Interpreter.Options()
+                .setNumThreads(2)
+                .setUseNNAPI(true)
+                .setAllowFp16PrecisionForFp32(false)
+                .setAllowBufferHandleOutput(false));
     assertThat(interpreter).isNotNull();
     assertThat(interpreter.getInputTensorCount()).isEqualTo(1);
     assertThat(interpreter.getInputTensor(0).dataType()).isEqualTo(DataType.FLOAT32);
@@ -245,6 +252,18 @@ public final class InterpreterTest {
                   + " TensorFlowLite type INT32)");
     }
     interpreter.close();
+  }
+
+  @Test
+  public void testRunWithUnsupportedInputType() {
+    FloatBuffer floatBuffer = FloatBuffer.allocate(10);
+    float[][][][] parsedOutputs = new float[2][8][8][3];
+    try (Interpreter interpreter = new Interpreter(MODEL_FILE)) {
+      interpreter.run(floatBuffer, parsedOutputs);
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessageThat().contains("DataType error: cannot resolve DataType of");
+    }
   }
 
   @Test

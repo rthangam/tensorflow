@@ -43,6 +43,7 @@ class OpKernelContext;
 class Tensor;
 class TensorBuffer;
 class TensorCApi;
+class TensorCord;
 class TensorDescription;
 class TensorProto;
 class Var;
@@ -237,7 +238,8 @@ class Tensor {
     return true;
 #else
     void* ptr = base<void>();
-    return reinterpret_cast<intptr_t>(ptr) % EIGEN_MAX_ALIGN_BYTES == 0;
+    return dtype() == DT_STRING ||
+           (reinterpret_cast<intptr_t>(ptr) % EIGEN_MAX_ALIGN_BYTES == 0);
 #endif
   }
 
@@ -554,12 +556,37 @@ class Tensor {
   /// REQUIRES: `DataTypeCanUseMemcpy(dtype())`.
   StringPiece tensor_data() const;
 
-  /// Copy the other tensor into this tensor and reshape it and reinterpret the
-  /// buffer's datatype.
+  /// Copy the other tensor into this tensor, reshape it and reinterpret the
+  /// buffer's datatype. If Status::OK() is returned, the two tensors now share
+  /// the same underlying storage.
   ///
-  /// This tensor shares other's underlying storage.
-  void UnsafeCopyFromInternal(const Tensor&, DataType dtype,
-                              const TensorShape&);
+  /// This call requires that the `other` tensor and the given type and shape
+  /// are "compatible" (i.e. they occupy the same number of bytes).
+  ///
+  /// Specifically:
+  ///
+  /// shape.num_elements() * DataTypeSize(type)
+  ///
+  /// must equal
+  ///
+  /// other.num_elements() * DataTypeSize(other.dtype())
+  ///
+  /// In addition, this function requires:
+  ///   * DataTypeSize(other.dtype()) != 0
+  ///   * DataTypeSize(type) != 0
+  ///
+  /// If any of the requirements are not met, errors::InvalidArgument is
+  /// returned.
+  Status BitcastFrom(const Tensor& other, DataType dtype,
+                     const TensorShape& shape);
+
+  /// Like BitcastFrom, but CHECK fails if any preconditions are not met.
+  ///
+  /// Deprecated. Use BitcastFrom instead and check the returned Status.
+  void UnsafeCopyFromInternal(const Tensor& other, DataType dtype,
+                              const TensorShape& shape) {
+    TF_CHECK_OK(BitcastFrom(other, dtype, shape));
+  }
 
  private:
   // Returns true if the refcount on buf_ and any possible underlying root
@@ -581,6 +608,7 @@ class Tensor {
 
   friend class DMAHelper;
   friend class TensorCApi;
+  friend class TensorCord;            // For access to buf_
   friend class TensorReference;       // For access to buf_
   friend class VariableOp;            // For access to set_shape
   friend class AutoReloadVariableOp;  // For access to set_shape

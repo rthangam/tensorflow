@@ -40,8 +40,6 @@ limitations under the License.
 namespace xla {
 namespace {
 
-namespace gtl = ::tensorflow::gtl;
-
 class HloProfileTest : public ClientLibraryTestBase {};
 
 struct ParsedProfileOutputLine {
@@ -137,7 +135,7 @@ void ExecuteAndFetchProfile(string* profile_output, LocalClient* client,
   LocalService* service = ClientLibrary::GetXlaService(client->platform());
   Backend* backend = service->mutable_backend();
   se::StreamExecutor* executor = backend->default_stream_executor();
-  DeviceMemoryAllocator* allocator = backend->memory_allocator();
+  se::DeviceMemoryAllocator* allocator = backend->memory_allocator();
   auto* transfer_manager = backend->transfer_manager();
   TF_ASSERT_OK_AND_ASSIGN(
       StreamPool::Ptr stream_ptr,

@@ -19,11 +19,11 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/transpose_op.h"
 
+#include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
-#include "tensorflow/core/kernels/bounds_check.h"
 #include "tensorflow/core/kernels/transpose_functor.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/strings/str_util.h"
@@ -176,10 +176,9 @@ void TransposeOp::Compute(OpKernelContext* ctx) {
     }
   }
   for (int i = 0; i < dims; ++i) {
-    OP_REQUIRES(
-        ctx, bits[i],
-        errors::InvalidArgument(i, " is missing from {",
-                                str_util::Join(permutation, ","), "}."));
+    OP_REQUIRES(ctx, bits[i],
+                errors::InvalidArgument(i, " is missing from {",
+                                        absl::StrJoin(permutation, ","), "}."));
   }
 
   // 0-D, 1-D, and identity transposes do nothing.

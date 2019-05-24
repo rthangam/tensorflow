@@ -94,7 +94,7 @@ cuda_py_test(
         "//third_party/py/numpy",
         "@six_archive//:six",
         "//tensorflow/contrib/learn",
-        "//tensorflow/contrib/learn:head_test",
+        "//tensorflow/contrib/learn:head_test_lib",
         "//tensorflow/python/ops/distributions",
         "//tensorflow/python:client_testlib",
         "//tensorflow/python:framework_ops",
@@ -294,7 +294,10 @@ cuda_py_test(
         "//tensorflow/python:nn_ops",
         "//tensorflow/python:platform_test",
     ],
-    tags = ["nomsan"],  # disable to avoid false positives from scipy.
+    tags = [
+        "nomsan",  # disable to avoid false positives from scipy.
+        "notap",  # TODO(b/130421237)
+    ],
 )
 
 cuda_py_test(
@@ -822,7 +825,7 @@ cuda_py_test(
 
 cuda_py_test(
     name = "affine_test",
-    size = "large",
+    size = "medium",
     srcs = ["python/kernel_tests/bijectors/affine_test.py"],
     additional_deps = [
         ":bijectors_py",
@@ -837,7 +840,7 @@ cuda_py_test(
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform_test",
     ],
-    shard_count = 5,
+    shard_count = 10,
     tags = ["noasan"],  # times out b/63678675
 )
 

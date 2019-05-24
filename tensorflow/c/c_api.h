@@ -19,6 +19,10 @@ limitations under the License.
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tensorflow/c/tf_attrtype.h"
+#include "tensorflow/c/tf_datatype.h"
+#include "tensorflow/c/tf_status.h"
+
 // --------------------------------------------------------------------------
 // C API for TensorFlow.
 //
@@ -69,7 +73,7 @@ limitations under the License.
 // .dylib, .dll).
 // This duplicates the TF_EXPORT macro definition in
 // tensorflow/core/platform/macros.h in order to keep this .h file independent
-// of any other includes.$a
+// of any other includes.
 #ifdef SWIG
 #define TF_CAPI_EXPORT
 #else
@@ -92,89 +96,6 @@ extern "C" {
 // TF_Version returns a string describing version information of the
 // TensorFlow library. TensorFlow using semantic versioning.
 TF_CAPI_EXPORT extern const char* TF_Version(void);
-
-// --------------------------------------------------------------------------
-// TF_DataType holds the type for a scalar value.  E.g., one slot in a tensor.
-// The enum values here are identical to corresponding values in types.proto.
-typedef enum TF_DataType {
-  TF_FLOAT = 1,
-  TF_DOUBLE = 2,
-  TF_INT32 = 3,  // Int32 tensors are always in 'host' memory.
-  TF_UINT8 = 4,
-  TF_INT16 = 5,
-  TF_INT8 = 6,
-  TF_STRING = 7,
-  TF_COMPLEX64 = 8,  // Single-precision complex
-  TF_COMPLEX = 8,    // Old identifier kept for API backwards compatibility
-  TF_INT64 = 9,
-  TF_BOOL = 10,
-  TF_QINT8 = 11,     // Quantized int8
-  TF_QUINT8 = 12,    // Quantized uint8
-  TF_QINT32 = 13,    // Quantized int32
-  TF_BFLOAT16 = 14,  // Float32 truncated to 16 bits.  Only for cast ops.
-  TF_QINT16 = 15,    // Quantized int16
-  TF_QUINT16 = 16,   // Quantized uint16
-  TF_UINT16 = 17,
-  TF_COMPLEX128 = 18,  // Double-precision complex
-  TF_HALF = 19,
-  TF_RESOURCE = 20,
-  TF_VARIANT = 21,
-  TF_UINT32 = 22,
-  TF_UINT64 = 23,
-} TF_DataType;
-
-// TF_DataTypeSize returns the sizeof() for the underlying type corresponding
-// to the given TF_DataType enum value. Returns 0 for variable length types
-// (eg. TF_STRING) or on failure.
-TF_CAPI_EXPORT extern size_t TF_DataTypeSize(TF_DataType dt);
-
-// --------------------------------------------------------------------------
-// TF_Code holds an error code.  The enum values here are identical to
-// corresponding values in error_codes.proto.
-typedef enum TF_Code {
-  TF_OK = 0,
-  TF_CANCELLED = 1,
-  TF_UNKNOWN = 2,
-  TF_INVALID_ARGUMENT = 3,
-  TF_DEADLINE_EXCEEDED = 4,
-  TF_NOT_FOUND = 5,
-  TF_ALREADY_EXISTS = 6,
-  TF_PERMISSION_DENIED = 7,
-  TF_UNAUTHENTICATED = 16,
-  TF_RESOURCE_EXHAUSTED = 8,
-  TF_FAILED_PRECONDITION = 9,
-  TF_ABORTED = 10,
-  TF_OUT_OF_RANGE = 11,
-  TF_UNIMPLEMENTED = 12,
-  TF_INTERNAL = 13,
-  TF_UNAVAILABLE = 14,
-  TF_DATA_LOSS = 15,
-} TF_Code;
-
-// --------------------------------------------------------------------------
-// TF_Status holds error information.  It either has an OK code, or
-// else an error code with an associated error message.
-typedef struct TF_Status TF_Status;
-
-// Return a new status object.
-TF_CAPI_EXPORT extern TF_Status* TF_NewStatus(void);
-
-// Delete a previously created status object.
-TF_CAPI_EXPORT extern void TF_DeleteStatus(TF_Status*);
-
-// Record <code, msg> in *s.  Any previous information is lost.
-// A common use is to clear a status: TF_SetStatus(s, TF_OK, "");
-TF_CAPI_EXPORT extern void TF_SetStatus(TF_Status* s, TF_Code code,
-                                        const char* msg);
-
-// Return the code record in *s.
-TF_CAPI_EXPORT extern TF_Code TF_GetCode(const TF_Status* s);
-
-// Return a pointer to the (null-terminated) error message in *s.  The
-// return value points to memory that is only usable until the next
-// mutation to *s.  Always returns an empty string if TF_GetCode(s) is
-// TF_OK.
-TF_CAPI_EXPORT extern const char* TF_Message(const TF_Status* s);
 
 // --------------------------------------------------------------------------
 // TF_Buffer holds a pointer to a block of data and its associated length.
@@ -271,6 +192,39 @@ TF_CAPI_EXPORT extern size_t TF_TensorByteSize(const TF_Tensor*);
 
 // Return a pointer to the underlying data buffer.
 TF_CAPI_EXPORT extern void* TF_TensorData(const TF_Tensor*);
+
+// Returns the number of elements in the tensor.
+TF_CAPI_EXPORT extern int64_t TF_TensorElementCount(const TF_Tensor* tensor);
+
+// Copy the internal data representation of `from` to `to`. `new_dims` and
+// `num_new_dims` specify the new shape of the `to` tensor, `type` specifies its
+// data type. On success, *status is set to TF_OK and the two tensors share the
+// same data buffer.
+//
+// This call requires that the `from` tensor and the given type and shape (dims
+// and num_dims) are "compatible" (i.e. they occupy the same number of bytes).
+// Specifically, given from_type_size = TF_DataTypeSize(TF_TensorType(from)):
+//
+// ShapeElementCount(dims, num_dims) * TF_DataTypeSize(type)
+//
+// must equal
+//
+// TF_TensorElementCount(from) * from_type_size
+//
+// where TF_ShapeElementCount would be the number of elements in a tensor with
+// the given shape.
+//
+// In addition, this function requires:
+//   * TF_DataTypeSize(TF_TensorType(from)) != 0
+//   * TF_DataTypeSize(type) != 0
+//
+// If any of the requirements are not met, *status is set to
+// TF_INVALID_ARGUMENT.
+TF_CAPI_EXPORT extern void TF_TensorBitcastFrom(const TF_Tensor* from,
+                                                TF_DataType type, TF_Tensor* to,
+                                                const int64_t* new_dims,
+                                                int num_new_dims,
+                                                TF_Status* status);
 
 // --------------------------------------------------------------------------
 // Encode the string `src` (`src_len` bytes long) into `dst` in the format
@@ -516,6 +470,10 @@ TF_CAPI_EXPORT extern void TF_SetAttrTypeList(TF_OperationDescription* desc,
                                               const char* attr_name,
                                               const TF_DataType* values,
                                               int num_values);
+TF_CAPI_EXPORT extern void TF_SetAttrPlaceholder(TF_OperationDescription* desc,
+                                                 const char* attr_name,
+                                                 const char* placeholder);
+
 // Set a 'func' attribute to the specified name.
 // `value` must point to a string of length `length` bytes.
 TF_CAPI_EXPORT extern void TF_SetAttrFuncName(TF_OperationDescription* desc,
@@ -648,19 +606,6 @@ TF_CAPI_EXPORT extern int TF_OperationNumControlOutputs(TF_Operation* oper);
 TF_CAPI_EXPORT extern int TF_OperationGetControlOutputs(
     TF_Operation* oper, TF_Operation** control_outputs,
     int max_control_outputs);
-
-// TF_AttrType describes the type of the value of an attribute on an operation.
-typedef enum TF_AttrType {
-  TF_ATTR_STRING = 0,
-  TF_ATTR_INT = 1,
-  TF_ATTR_FLOAT = 2,
-  TF_ATTR_BOOL = 3,
-  TF_ATTR_TYPE = 4,
-  TF_ATTR_SHAPE = 5,
-  TF_ATTR_TENSOR = 6,
-  TF_ATTR_PLACEHOLDER = 7,
-  TF_ATTR_FUNC = 8,
-} TF_AttrType;
 
 // TF_AttrMetadata describes the value of an attribute on an operation.
 typedef struct TF_AttrMetadata {
@@ -1277,6 +1222,28 @@ TF_CAPI_EXPORT extern TF_Function* TF_GraphToFunction(
     int noutputs, const TF_Output* outputs, const char* const* output_names,
     const TF_FunctionOptions* opts, const char* description, TF_Status* status);
 
+// Similar to TF_GraphToFunction but allows specifying control outputs of the
+// function.
+//
+//  The arguments of TF_GraphToFunction have the same meaning, but the new
+//  arguments are as follows:
+//
+//    ncontrol_outputs: Number of control outputs of the function.
+//    control_outputs: vector of TF_Operation objects to be marked as control
+//      outputs of the function. Operations marked as control outputs are
+//      guaranteed to execute.
+//    control_output_names: Optional. If not nullptr, vector of strings, one
+//      per control output, with their names to be added to the function's
+//      OpDef.
+TF_CAPI_EXPORT extern TF_Function* TF_GraphToFunctionWithControlOutputs(
+    const TF_Graph* fn_body, const char* fn_name,
+    unsigned char append_hash_to_fn_name, int num_opers,
+    const TF_Operation* const* opers, int ninputs, const TF_Output* inputs,
+    int noutputs, const TF_Output* outputs, const char* const* output_names,
+    int ncontrol_outputs, const TF_Operation* const* control_outputs,
+    const char* const* control_output_names, const TF_FunctionOptions* opts,
+    const char* description, TF_Status* status);
+
 // Returns the name of the graph function.
 // The return value points to memory that is only usable until the next
 // mutation to *func.
@@ -1709,6 +1676,14 @@ TF_CAPI_EXPORT extern const char* TF_ServerTarget(TF_Server* server);
 // Destroy an in-process TensorFlow server, frees memory. If server is running
 // it will be stopped and joined.
 TF_CAPI_EXPORT extern void TF_DeleteServer(TF_Server* server);
+
+// Register a listener method that processes printed messages.
+//
+// If any listeners are registered, the print operator will call all listeners
+// with the printed messages and immediately return without writing to the
+// logs.
+TF_CAPI_EXPORT extern void TF_RegisterLogListener(
+    void (*listener)(const char*));
 
 #ifdef __cplusplus
 } /* end extern "C" */

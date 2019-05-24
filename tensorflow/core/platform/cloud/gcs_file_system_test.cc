@@ -889,9 +889,9 @@ TEST(GcsFileSystemTest, NewWritableFile_ResumeUploadAllAttemptsFail) {
   const auto& status = file->Close();
   EXPECT_EQ(errors::Code::ABORTED, status.code());
   EXPECT_TRUE(
-      str_util::StrContains(status.error_message(),
-                            "All 10 retry attempts failed. The last failure: "
-                            "Unavailable: important HTTP error 503"))
+      absl::StrContains(status.error_message(),
+                        "All 10 retry attempts failed. The last failure: "
+                        "Unavailable: important HTTP error 503"))
       << status;
 }
 
@@ -947,11 +947,11 @@ TEST(GcsFileSystemTest, NewWritableFile_UploadReturns410) {
   const auto& status = file->Close();
   EXPECT_EQ(errors::Code::UNAVAILABLE, status.code());
   EXPECT_TRUE(
-      str_util::StrContains(status.error_message(),
-                            "Upload to gs://bucket/path/writeable.txt failed, "
-                            "caused by: Not found: important HTTP error 410"))
+      absl::StrContains(status.error_message(),
+                        "Upload to gs://bucket/path/writeable.txt failed, "
+                        "caused by: Not found: important HTTP error 410"))
       << status;
-  EXPECT_TRUE(str_util::StrContains(
+  EXPECT_TRUE(absl::StrContains(
       status.error_message(), "when uploading gs://bucket/path/writeable.txt"))
       << status;
 }
@@ -3155,8 +3155,8 @@ TEST(GcsFileSystemTest, AdditionalRequestHeaderTest) {
 TEST(GcsFileSystemTest, OverrideCacheParameters) {
   // Verify defaults are propagated correctly.
   GcsFileSystem fs1;
-  EXPECT_EQ(128 * 1024 * 1024, fs1.block_size());
-  EXPECT_EQ(2 * fs1.block_size(), fs1.max_bytes());
+  EXPECT_EQ(16 * 1024 * 1024, fs1.block_size());
+  EXPECT_EQ(fs1.block_size(), fs1.max_bytes());
   EXPECT_EQ(0, fs1.max_staleness());
   EXPECT_EQ(120, fs1.timeouts().connect);
   EXPECT_EQ(60, fs1.timeouts().idle);
